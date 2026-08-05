@@ -306,7 +306,9 @@ export function parseTradeRows(rows: string[][]): ImportedItem[] {
     if (amount === null || amount <= 0) continue;
 
     const fx = parseNumber(cell("fx"));
-    const entryRate = fx && fx > 0 && currency !== "EUR" ? (fx < 1 ? 1 / fx : fx) : null;
+    // Keep the raw figure — ImportDialog orients it against that day's market
+    // rate so "0.87 EUR per USD" and "1.15 USD per EUR" both land correctly.
+    const entryRate = fx && fx > 0 && currency !== "EUR" ? fx : null;
 
     out.push({
       // content-based, so re-uploading the same statement never doubles a buy
@@ -349,7 +351,10 @@ function parseTradeCashRows(rows: string[][]): ParsedFxTrade[] {
 
     const fx = parseNumber(cell("fx"));
     if (!fx || fx <= 0) continue;
-    const rate = fx < 1 ? 1 / fx : fx; // 1 EUR = rate <currency>
+    // Prefer the orientation where 1 EUR buys more than 1 unit of a weaker
+    // currency (USD, GBP, …). JPY-style quotes stay >1 either way; the
+    // ImportDialog re-orients against the official rate when filling gaps.
+    const rate = fx < 1 && fx > 0 ? 1 / fx : fx;
 
     const signed = /withdraw/i.test(type) ? -Math.abs(money.amount) : money.amount;
     out.push({
@@ -658,8 +663,20 @@ export function parseTransfers(rows: string[][], skipTrading = false): ImportedI
       amount: 0,
       eur: 0,
     };
+    // Withdrawal without an EUR leg: shrink the euro cost in proportion to the
+    // units leaving. Otherwise leftover EUR + smaller USD ⇒ rates like 0.34.
+    if (into < 0 && eurInto === 0 && prev.amount > 0 && prev.eur > 0) {
+      const leave = Math.min(-into, prev.amount);
+      prev.eur *= (prev.amount - leave) / prev.amount;
+    }
     prev.amount += into;
     prev.eur += eurInto;
+    if (prev.amount < 0) {
+      prev.amount = 0;
+      prev.eur = 0;
+    } else if (prev.eur < 0) {
+      prev.eur = 0;
+    }
     if (into > 0 && (!prev.date || date < prev.date)) prev.date = date;
     acc.set(key, prev);
   }

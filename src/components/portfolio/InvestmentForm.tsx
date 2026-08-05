@@ -192,7 +192,8 @@ export function InvestmentForm({ onSave, initial, trigger, base = "EUR" }: Props
             </div>
             <div className="grid gap-2">
               <Label htmlFor="rate">
-                Rate {lookingUp ? <span className="text-muted-foreground">…</span> : null}
+                1 {base} = ? {currency}{" "}
+                {lookingUp ? <span className="text-muted-foreground">…</span> : null}
               </Label>
               <Input
                 id="rate"

@@ -1,4 +1,5 @@
 import type { RateMap, Series } from "./rates";
+import { saneCurrencyPerBase } from "./fx-quote";
 
 export type Investment = {
   id: string;
@@ -86,6 +87,10 @@ export type Metrics = {
   totalPnl: number;
   totalPct: number;
   liveRate: number;
+  /** entry rate after fixing upside-down / implausible quotes ("1 base = x currency") */
+  entryRate: number;
+  /** rate source after sanity — implausible statement figures surface as estimated */
+  rateSource?: "statement" | "estimated" | "manual";
   holdingDays: number;
   /** annualised volatility of the EUR/CCY pair, decimal */
   fxVol: number;
@@ -141,7 +146,27 @@ export function computeMetrics(
   /** the currency all "Eur"-suffixed figures are denominated in */
   base = "EUR",
 ): Metrics {
-  const liveRate = investment.currency === base ? 1 : (liveRates[investment.currency] ?? investment.entryRate);
+  const rawLive = investment.currency === base ? 1 : (liveRates[investment.currency] ?? investment.entryRate);
+  // Stored entry rates are "1 base = x currency". Upside-down quotes are
+  // flipped; garbage cost bases (e.g. 0.34 USD/EUR) fall back to the live
+  // market — unless the user typed the rate in by hand.
+  const trustFar = investment.rateSource === "manual";
+  const { rate: entryRate, usedMarket } =
+    investment.currency === base
+      ? { rate: 1, usedMarket: false }
+      : saneCurrencyPerBase(
+          investment.entryRate,
+          rawLive > 0 ? rawLive : investment.entryRate,
+          { trustFar },
+        );
+  const liveRate = rawLive > 0 ? rawLive : entryRate;
+  /** Effective source after sanity — implausible statement figures become guesses. */
+  const rateSource =
+    investment.currency === base
+      ? investment.rateSource
+      : usedMarket
+        ? ("estimated" as const)
+        : investment.rateSource;
   const holdingDays = daysBetween(new Date(investment.date), new Date());
   const rate = investment.interestRate ?? 0;
   // Interest that has built up on this exact position since its own start date.
@@ -149,9 +174,9 @@ export function computeMetrics(
   const currentValue = investment.currentValue ?? grown;
   const interestEarned = currentValue - investment.amount;
 
-  const entryEur = investment.amount / investment.entryRate;
+  const entryEur = investment.amount / entryRate;
   const nowEur = currentValue / liveRate;
-  const nowEurAtEntryFx = currentValue / investment.entryRate;
+  const nowEurAtEntryFx = currentValue / entryRate;
   const fxPnl = nowEur - nowEurAtEntryFx;
   const assetPnl = nowEurAtEntryFx - entryEur;
   const totalPnl = nowEur - entryEur;
@@ -160,18 +185,31 @@ export function computeMetrics(
   const noiseEur = fxNoise * entryEur;
 
   // Break-even: currentValue / X = entryEur  ->  X = currentValue * entryRate / amount
-  const breakEvenPerEur = investment.amount === 0 ? liveRate : (currentValue * investment.entryRate) / investment.amount;
+  const breakEvenPerEur = investment.amount === 0 ? liveRate : (currentValue * entryRate) / investment.amount;
   const breakEvenEurPer = breakEvenPerEur === 0 ? 0 : 1 / breakEvenPerEur;
   // Positive = today's rate is already better than what you need.
   const breakEvenGap = breakEvenPerEur === 0 ? 0 : (breakEvenPerEur - liveRate) / breakEvenPerEur;
 
   // If the rate never moves again, how long until interest alone covers the gap?
   let daysToBreakEven: number | null = null;
-  if (totalPnl < 0 && rate > 0 && liveRate > 0 && investment.entryRate > 0) {
-    const need = Math.log(liveRate / investment.entryRate) / Math.log(1 + rate);
+  if (totalPnl < 0 && rate > 0 && liveRate > 0 && entryRate > 0 && liveRate !== entryRate) {
+    const need = Math.log(liveRate / entryRate) / Math.log(1 + rate);
     const days = need * 365 - holdingDays;
-    if (Number.isFinite(days) && days > 0) daysToBreakEven = Math.ceil(days);
+    // Cap absurd horizons from near-zero / inverted rates that slipped through.
+    if (Number.isFinite(days) && days > 0 && days < 365 * 40) daysToBreakEven = Math.ceil(days);
   }
+
+  // Base-currency holdings have no FX risk — don't show "Too early to convert".
+  const maturity =
+    investment.currency === base
+      ? totalPnl >= 0
+        ? 2
+        : -1
+      : noiseEur === 0
+        ? totalPnl > 0
+          ? 2
+          : 0
+        : totalPnl / noiseEur;
 
   return {
     investment,
@@ -185,10 +223,12 @@ export function computeMetrics(
     totalPnl,
     totalPct: entryEur === 0 ? 0 : totalPnl / entryEur,
     liveRate,
+    entryRate,
+    ...(rateSource ? { rateSource } : {}),
     holdingDays,
     fxVol,
     fxNoise,
-    maturity: noiseEur === 0 ? (totalPnl > 0 ? 2 : 0) : totalPnl / noiseEur,
+    maturity,
     interestEarned,
     breakEvenPerEur,
     breakEvenEurPer,
@@ -204,10 +244,10 @@ export const pct = (n: number) =>
   `${n >= 0 ? "+" : ""}${(n * 100).toFixed(2)}%`;
 
 export function maturityLabel(m: number) {
-  if (m >= 1.5) return { label: "Safe to cash out", tone: "good" as const };
-  if (m >= 0.5) return { label: "Getting there", tone: "warn" as const };
-  if (m >= -0.5) return { label: "Too early", tone: "muted" as const };
-  return { label: "Losing money", tone: "bad" as const };
+  if (m >= 1.5) return { label: "OK to convert back", tone: "good" as const };
+  if (m >= 0.5) return { label: "Almost there", tone: "warn" as const };
+  if (m >= -0.5) return { label: "Too early to convert", tone: "muted" as const };
+  return { label: "Underwater for now", tone: "bad" as const };
 }
 
 /** e.g. "1.1642" -> "1.1642"; keeps enough digits for FX without noise */

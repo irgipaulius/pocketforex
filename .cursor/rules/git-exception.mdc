@@ -1,0 +1,24 @@
+---
+description: Pocket Forex allows agent git commit and push
+alwaysApply: true
+---
+
+# Pocket Forex — Git exception
+
+This project **overrides** the global “user owns all Git” restriction.
+
+## Allowed here
+
+- The agent **may** `git add`, `git commit`, and `git push` when the user asks to commit, push, ship, or when a Cursor commit/push action is selected.
+- Follow normal commit hygiene: stage only related files, concise messages, never force-push `main` unless explicitly asked, never skip hooks unless asked, never amend unless the usual amend rules are met.
+- Read-only git (`status`, `diff`, `log`) stays fine.
+
+## Still forbidden (global rules still apply)
+
+- Prisma migrate / apply / reset / wipe commands
+- Destructive git (`push --force` to main, hard reset) unless the user explicitly requests it
+- Updating git config
+
+## Prisma
+
+Unchanged: do not run Prisma migrate commands.

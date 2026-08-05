@@ -67,11 +67,11 @@ export function ValueChart({
         <YAxis tick={axis} tickLine={false} axisLine={false} width={64} tickFormatter={compact(currency)} />
         <Tooltip
           contentStyle={tooltipStyle}
-          formatter={(v: number, n) => [fmt(v), n === "live" ? "Actual (with FX)" : "If FX never moved"]}
+          formatter={(v: number, n) => [fmt(v), n === "live" ? "Worth today" : "If the rate never moved"]}
         />
         <Legend
           wrapperStyle={{ fontSize: 12 }}
-          formatter={(v) => (v === "live" ? "Actual (with FX)" : "If FX never moved")}
+          formatter={(v) => (v === "live" ? "Worth today" : "If the rate never moved")}
         />
         <Area
           type="monotone"
@@ -108,7 +108,7 @@ export function FxImpactChart({
         <CartesianGrid stroke="var(--color-border)" vertical={false} />
         <XAxis dataKey="date" tick={axis} tickLine={false} axisLine={false} minTickGap={40} />
         <YAxis tick={axis} tickLine={false} axisLine={false} width={64} tickFormatter={compact(currency)} />
-        <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [fmt(v), "FX impact"]} />
+        <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => [fmt(v), "Exchange rate effect"]} />
         <Area type="monotone" dataKey="fx" stroke="var(--color-primary)" strokeWidth={2} fill="url(#gFx)" />
       </AreaChart>
     </ResponsiveContainer>

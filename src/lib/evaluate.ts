@@ -11,6 +11,7 @@
 import { computeMetrics, type Investment, type Metrics } from "./portfolio";
 import type { RateMap } from "./rates";
 import type { FxTrade } from "./fx-trades";
+import { alignQuoteWithLive, netFxCostBasis } from "./fx-quote";
 
 export type Verdict = {
   /** what the numbers say to do with this currency right now */
@@ -79,27 +80,28 @@ function makeVerdict(
   if (!c.live || !c.breakEvenPerEur) {
     return {
       action: "watch",
-      headline: `Watching ${c.currency}`,
-      detail: `Once you exchange money into ${c.currency}, this compares today's rate with the rate you actually paid.`,
+      headline: `Waiting on a ${c.currency} rate`,
+      detail: `After you hold some ${c.currency}, this tells you whether converting back to ${base} today would leave you ahead or behind.`,
       tone: "muted",
     };
   }
   if (c.aboveBreakEven) {
     return {
       action: "sell",
-      headline: `Good time to sell ${c.currency}`,
+      headline: `Converting ${c.currency} back today locks in a gain`,
       detail:
-        `Moving your ${c.currency} back to ${base} today leaves you ${money(Math.abs(c.pnlEur))} up on what you put in. ` +
-        `You only slip back into a loss if 1 ${c.currency} falls below ${c.breakEvenEurPer.toFixed(4)} ${base}.`,
+        `You'd get about ${money(Math.abs(c.pnlEur))} more ${base} than you put in. ` +
+        `You only fall into a loss if 1 ${c.currency} drops below ${c.breakEvenEurPer.toFixed(4)} ${base}.`,
       tone: "gain",
     };
   }
   return {
     action: "buy",
-    headline: `Good time to buy ${c.currency} — bad time to sell it`,
+    headline: `Don't convert ${c.currency} back yet`,
     detail:
-      `${c.currency} is ${pctStr(c.gap)} cheaper than the average rate you paid, so new money buys more of it. ` +
-      `But cashing out what you already hold would cost you ${money(Math.abs(c.pnlEur))} — hold until 1 ${c.currency} is worth ${c.breakEvenEurPer.toFixed(4)} ${base}.`,
+      `Cashing out today would cost you about ${money(Math.abs(c.pnlEur))} versus what you paid. ` +
+      `Wait until 1 ${c.currency} is worth at least ${c.breakEvenEurPer.toFixed(4)} ${base} ` +
+      `(it's ${c.liveEurPer.toFixed(4)} today). New ${c.currency} buys are ${pctStr(c.gap)} cheaper than your average — fine for topping up, not for exiting.`,
     tone: "loss",
   };
 }
@@ -151,8 +153,33 @@ export function evaluate({
   }
 
   const currencies: CurrencyEval[] = Array.from(acc, ([currency, v]) => {
-    const breakEvenPerEur = v.entryEur > 0 ? v.holding / v.entryEur : 0;
     const live = liveRates[currency] ?? 0;
+    const liveEurPer = live ? 1 / live : 0;
+
+    // Positions are the source of truth when you hold the asset. Past swaps on
+    // the rate chart are a second opinion: if they imply a very different
+    // "base per currency" cost (classic sign of an inverted entry rate on an
+    // imported lot), prefer the swap-derived basis for this currency's quote.
+    let breakEvenEurPer = v.entryEur > 0 && v.holding > 0 ? v.entryEur / v.holding : 0;
+    const fromSwaps = netFxCostBasis(fxTrades, currency);
+    if (fromSwaps && liveEurPer > 0) {
+      const swapBe = fromSwaps.basePerCurrency;
+      const posBe = breakEvenEurPer;
+      const swapCloser =
+        !posBe ||
+        Math.abs(Math.log(swapBe / liveEurPer)) < Math.abs(Math.log(posBe / liveEurPer));
+      // Also catch the "1.67 EUR per USD vs 0.87 live" inversion: opposite
+      // sides of 1 while the swaps sit next to live.
+      const posInverted = posBe > 0 && posBe > 1 !== liveEurPer > 1;
+      if (posInverted || (swapCloser && Math.abs(Math.log(swapBe / (posBe || swapBe))) > Math.log(1.15))) {
+        breakEvenEurPer = swapBe;
+      }
+    }
+    if (breakEvenEurPer > 0 && liveEurPer > 0) {
+      breakEvenEurPer = alignQuoteWithLive(breakEvenEurPer, liveEurPer);
+    }
+    const breakEvenPerEur = breakEvenEurPer > 0 ? 1 / breakEvenEurPer : 0;
+
     const core = {
       currency,
       holding: v.holding,
@@ -162,9 +189,9 @@ export function evaluate({
       fxPnlEur: v.fx,
       assetPnlEur: v.asset,
       breakEvenPerEur,
-      breakEvenEurPer: breakEvenPerEur ? 1 / breakEvenPerEur : 0,
+      breakEvenEurPer,
       live,
-      liveEurPer: live ? 1 / live : 0,
+      liveEurPer,
       // fewer units per euro than break-even = the currency is strong enough
       // that cashing out returns more euro than you put in.
       aboveBreakEven: live > 0 && breakEvenPerEur > 0 && live <= breakEvenPerEur,

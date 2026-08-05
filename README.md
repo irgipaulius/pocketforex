@@ -1,6 +1,6 @@
 # Pocket Forex
 
-Personal FX portfolio tracker: positions, live cross rates, charts, and Revolut statement import.
+Private FX portfolio tracker: multi-currency positions, live cross rates, break-even exchange rates, and Revolut statement import — all in the browser.
 
 **Live:** [https://pocketforex.hyperreader.eu](https://pocketforex.hyperreader.eu)
 

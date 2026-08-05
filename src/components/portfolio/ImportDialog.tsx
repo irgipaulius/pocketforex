@@ -15,6 +15,7 @@ import { ImportInstructions } from "@/components/portfolio/ImportInstructions";
 import { parseRevolutStatement, parseRevolutFxTrades, type ImportedItem } from "@/lib/revolut-import";
 import type { FxTrade } from "@/lib/fx-trades";
 import type { Investment } from "@/lib/portfolio";
+import { isImplausibleRate, saneCurrencyPerBase } from "@/lib/fx-quote";
 
 type Props = {
   onImport: (items: Investment[], trades: FxTrade[]) => void;
@@ -108,11 +109,29 @@ export function ImportDialog({ onImport, trigger }: Props) {
     const out: Investment[] = [];
     for (const it of chosen) {
       const date = it.date ?? new Date().toISOString().slice(0, 10);
-      // Rate priority: the exact rate in the file > the rate implied by the
-      // statement's own EUR figure > the official rate on that exact day.
-      const implied = it.eurValue && it.eurValue > 0 ? it.amount / it.eurValue : null;
-      const exact = it.entryRate ?? implied;
-      const rate = exact ?? (await historicalRate(date, it.currency)) ?? 1;
+      // Rate priority: file rate > EUR figure on the statement > official day rate.
+      // Anything absurdly far from the market (bad transfer cost bases, inverted
+      // quotes) is discarded and replaced with that day's official rate.
+      const market = it.currency === "EUR" ? 1 : await historicalRate(date, it.currency);
+      const impliedRaw = it.eurValue && it.eurValue > 0 ? it.amount / it.eurValue : null;
+      const implied =
+        impliedRaw && market && market > 0 && !isImplausibleRate(impliedRaw, market)
+          ? impliedRaw
+          : impliedRaw && !market
+            ? impliedRaw
+            : null;
+      const fileRate =
+        it.entryRate && market && market > 0 && isImplausibleRate(it.entryRate, market)
+          ? null
+          : (it.entryRate ?? null);
+      const exact = fileRate ?? implied;
+      const raw = exact ?? market ?? 1;
+      const { rate, usedMarket } =
+        it.currency === "EUR"
+          ? { rate: 1, usedMarket: false }
+          : market && market > 0
+            ? saneCurrencyPerBase(raw, market)
+            : { rate: raw, usedMarket: false };
       out.push({
         id: crypto.randomUUID(),
         name: it.name,
@@ -120,7 +139,10 @@ export function ImportDialog({ onImport, trigger }: Props) {
         amount: it.amount,
         date,
         entryRate: rate,
-        rateSource: exact ? "statement" : it.currency === "EUR" ? "statement" : "estimated",
+        rateSource:
+          it.currency === "EUR" || (exact && !usedMarket)
+            ? "statement"
+            : "estimated",
         ...(it.interestRate !== undefined ? { interestRate: it.interestRate } : {}),
         note: `Imported from Revolut · ${it.bucket}`,
       });
@@ -153,7 +175,8 @@ export function ImportDialog({ onImport, trigger }: Props) {
         <DialogHeader>
           <DialogTitle>Import from Revolut</DialogTitle>
           <DialogDescription>
-            Read on your device only — your statement never leaves this browser.
+            See what your foreign savings and stocks are worth in your home currency — and whether
+            converting back today would cost you. Your file never leaves this device.
           </DialogDescription>
         </DialogHeader>
 

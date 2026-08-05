@@ -81,7 +81,7 @@ export function FxSignal({ base, quote, options, onQuoteChange, rate, breakEven,
       />
       <div className="relative flex flex-wrap items-center justify-between gap-2">
         <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <Sparkles className="size-3.5 text-primary" /> Buy or sell right now
+          <Sparkles className="size-3.5 text-primary" /> Should you convert back?
         </p>
         {options.length > 1 && (
           <select
@@ -102,24 +102,24 @@ export function FxSignal({ base, quote, options, onQuoteChange, rate, breakEven,
         <PairCard
           code={base}
           priceLabel={`${rate4(live)} ${quote}`}
-          sub={`1 ${base} buys this much ${quote}`}
+          sub={`What 1 ${base} buys in ${quote}`}
           changePct={changePct}
           good={!watching && !sellIsGood}
           spark={spark}
           hasBreakEven={be !== undefined}
           breakEvenLabel={be ? `break-even ${rate4(be)}` : ""}
-          hint={`How many ${quote} you get for 1 ${base}.\n\nGoing DOWN (red) = ${quote} is getting more expensive → a good moment to SELL your ${quote} back into ${base}.\n\nGoing UP (green) = ${quote} is getting cheaper → a good moment to BUY ${quote}.`}
+          hint={`How many ${quote} you get for 1 ${base}.\n\nGoing DOWN = ${quote} is getting stronger → converting ${quote} back to ${base} is better.\n\nGoing UP = ${quote} is getting cheaper → a better moment to buy more ${quote}.`}
         />
         <PairCard
           code={quote}
           priceLabel={`${rate4(live ? 1 / live : 0)} ${base}`}
-          sub={`1 ${quote} is worth this much ${base}`}
+          sub={`What 1 ${quote} is worth in ${base}`}
           changePct={-changePct}
           good={sellIsGood}
           spark={sparkInv}
           hasBreakEven={be !== undefined}
           breakEvenLabel={be ? `break-even ${rate4(1 / be)}` : ""}
-          hint={`What 1 ${quote} is worth in ${base}. This is the mirror image of the other chart.\n\nGoing DOWN (red) = ${quote} is cheap right now → a good moment to BUY ${quote}.\n\nGoing UP (green) = ${quote} is strong → a good moment to SELL ${quote} back into ${base}.`}
+          hint={`What 1 ${quote} buys in ${base} — the mirror of the other side.\n\nGoing UP = ${quote} is strong → good time to convert back.\n\nGoing DOWN = ${quote} is weak → wait, or buy more.`}
         />
       </div>
 

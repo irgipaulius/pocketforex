@@ -47,25 +47,12 @@ import { evaluate } from "@/lib/evaluate";
 import { baseRateLookup, rebaseInvestments, rebaseRates, rebaseTrades } from "@/lib/rebase";
 import { fetchCurrencies, fetchLatestRates, fetchTimeseries } from "@/lib/rates";
 import { getFxQuote } from "@/lib/fx-live.functions";
+import { SEO_LINKS, SEO_META, SITE_NAME } from "@/lib/seo";
 
 export const Route = createFileRoute("/")({
   head: () => ({
-    meta: [
-      { title: "Currency Compass — private Revolut FX dashboard" },
-      {
-        name: "description",
-        content:
-          "Import your Revolut statement and see how much of your gain is real and how much is just the euro moving. Runs entirely in your browser.",
-      },
-      { property: "og:title", content: "Currency Compass — private Revolut FX dashboard" },
-      {
-        property: "og:description",
-        content:
-          "Live EUR/USD charts with your own buys and sells marked, break-even targets, no account, no uploads.",
-      },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-    ],
+    meta: [...SEO_META],
+    links: [...SEO_LINKS],
   }),
   component: Dashboard,
 });
@@ -346,17 +333,58 @@ function Dashboard() {
       <main className="mx-auto w-full max-w-5xl px-4 pb-24 pt-10 sm:px-6">
         <Toaster position="top-center" />
         <div className="text-center">
-          <span className="inline-flex items-center gap-2 rounded-full bg-secondary/70 px-3 py-1 text-[11px] font-semibold text-muted-foreground">
+          <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{SITE_NAME}</h1>
+          <span className="mt-3 inline-flex items-center gap-2 rounded-full bg-secondary/70 px-3 py-1 text-[11px] font-semibold text-muted-foreground">
             <ShieldCheck className="size-3.5 text-gain" /> Private · no login · nothing leaves your
             device
           </span>
-          <h1 className="mx-auto mt-4 max-w-2xl text-balance text-3xl font-extrabold leading-tight tracking-tight sm:text-5xl">
-            “My dollars went up. But if I cash out today, does the exchange rate eat it all?”
-          </h1>
-          <p className="mx-auto mt-3 max-w-md text-pretty text-sm text-muted-foreground">
-            Import your Revolut statements and find out in seconds: how much of your gain is real, and
-            how much is just the euro moving. Stays cached on this device.
+          <p className="mx-auto mt-4 max-w-xl text-balance text-xl font-semibold leading-snug tracking-tight text-foreground/90 sm:text-2xl">
+            Your dollars went up in the app. But in euros — are you actually ahead?
           </p>
+          <p className="mx-auto mt-3 max-w-md text-pretty text-sm text-muted-foreground">
+            Built for Revolut savings, cash funds and stocks held in another currency. Import a
+            statement and get three plain answers:
+          </p>
+
+          <ul className="mx-auto mt-5 max-w-md space-y-3 text-left text-sm">
+            <li className="flex gap-3">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-bold text-primary">
+                1
+              </span>
+              <span>
+                <span className="font-semibold text-foreground">What it's worth at home</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  — your USD/GBP balance converted to the currency you actually spend.
+                </span>
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-bold text-primary">
+                2
+              </span>
+              <span>
+                <span className="font-semibold text-foreground">The break-even rate</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  — how strong the foreign currency must be before converting back makes sense.
+                </span>
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-bold text-primary">
+                3
+              </span>
+              <span>
+                <span className="font-semibold text-foreground">What moved the needle</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  — how much came from interest or stock growth vs the exchange rate helping or
+                  hurting.
+                </span>
+              </span>
+            </li>
+          </ul>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
             <ImportDialog
@@ -407,13 +435,11 @@ function Dashboard() {
           )}
           <FxCrossRates currencies={["EUR", "USD", "GBP", "CHF", "JPY"]} />
           <p className="mt-3 text-center text-[12px] text-muted-foreground">
-            Real live EUR/USD rate, worked out exactly like your own import will be — these are just
-            sample buys and sells.
+            Same live rate and maths your import will use — sample buys and sells only.
           </p>
         </div>
       </main>
     );
-
   }
 
   return (
@@ -423,7 +449,7 @@ function Dashboard() {
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Currency Compass
+            {SITE_NAME}
           </p>
           <h1 className="mt-1 text-3xl font-extrabold sm:text-4xl num">{fmt(totals.valueEur)}</h1>
           <p className={`mt-1 flex items-center gap-1.5 text-sm font-semibold ${tone} num`}>
@@ -496,9 +522,9 @@ function Dashboard() {
 
       <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl bg-secondary/50 px-4 py-2.5">
         <div>
-          <p className="text-xs font-semibold">Foreign currency only</p>
+          <p className="text-xs font-semibold">Only show foreign currency</p>
           <p className="text-[11px] text-muted-foreground">
-            Hide anything already held in {base} and show only money exposed to exchange rates.
+            Hide money already in {base}. What's left is what the exchange rate can still move.
           </p>
         </div>
         <button
@@ -518,18 +544,18 @@ function Dashboard() {
 
 
       <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Money put in" value={fmt(totals.investedEur)} />
+        <Stat label="What you paid" value={fmt(totals.investedEur)} />
         <Stat
-          label="From currency moves"
+          label="Exchange rate effect"
           value={fmt(totals.fxPnlEur)}
           tone={totals.fxPnlEur >= 0 ? "gain" : "loss"}
         />
         <Stat
-          label="From interest & growth"
+          label="Investment growth"
           value={fmt(totals.assetPnlEur)}
           tone={totals.assetPnlEur >= 0 ? "gain" : "loss"}
         />
-        <Stat label="Positions" value={String(totals.positions)} />
+        <Stat label="Holdings" value={String(totals.positions)} />
       </section>
 
       {activePair && activePair !== base && activeInfo && (
@@ -567,11 +593,10 @@ function Dashboard() {
 
       {shown.length === 0 ? (
         <div className="surface mt-6 p-10 text-center">
-          <h2 className="text-lg font-bold">No investments yet</h2>
+          <h2 className="text-lg font-bold">Nothing here yet</h2>
           <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
-            Add your first position with the amount, currency, date and the EUR rate you got — or
-            import a Revolut statement CSV. Everything is stored on this device and kept between
-            visits.
+            Add a USD savings pot or a stock you bought in another currency — or import a Revolut
+            statement. Everything stays on this device between visits.
           </p>
           <div className="mt-5 flex flex-wrap justify-center gap-2">
             <InvestmentForm
@@ -614,9 +639,9 @@ function Dashboard() {
 
           <div className="mt-4 grid gap-4 lg:grid-cols-5">
             <div className="surface p-4 lg:col-span-3">
-              <h3 className="text-sm font-bold">Money won or lost on currency</h3>
+              <h3 className="text-sm font-bold">How much the exchange rate moved you</h3>
               <p className="mb-2 text-xs text-muted-foreground">
-                Only the effect of the exchange rate — not interest or price growth.
+                Ignoring interest and stock prices — only the currency.
               </p>
               <FxImpactChart data={series} fmt={fmt} currency={base} />
             </div>
@@ -631,8 +656,8 @@ function Dashboard() {
 
           <h2 className="mt-8 text-base font-bold">Your positions</h2>
           <p className="text-xs text-muted-foreground">
-            Each one uses its own start date, its own exchange rate and its own interest rate —
-            nothing is averaged.
+            Each holding keeps its own purchase date and exchange rate — so a USD savings pot and a
+            stock buy aren't mashed into one average.
           </p>
           <PositionsTable
             fmt={fmt}

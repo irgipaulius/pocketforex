@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 
 import appCss from "../styles.css?url";
+import { SEO_LINKS, SEO_META } from "@/lib/seo";
 
 function NotFoundComponent() {
   return (
@@ -70,23 +71,7 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   head: () => ({
-    meta: [
-      { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Pocket Forex" },
-      {
-        name: "description",
-        content: "Personal FX portfolio tracker — positions, live rates, and Revolut import.",
-      },
-      { name: "author", content: "irgipaulius" },
-      { property: "og:title", content: "Pocket Forex" },
-      {
-        property: "og:description",
-        content: "Personal FX portfolio tracker — positions, live rates, and Revolut import.",
-      },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-    ],
+    meta: [{ charSet: "utf-8" }, { name: "viewport", content: "width=device-width, initial-scale=1" }, ...SEO_META],
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
@@ -99,8 +84,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: appCss,
       },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      ...SEO_LINKS,
     ],
-
   }),
   shellComponent: RootShell,
   component: RootComponent,

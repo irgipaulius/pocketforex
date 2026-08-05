@@ -29,6 +29,7 @@ import { rate4 } from "@/lib/portfolio";
 import type { FxTrade } from "@/lib/fx-trades";
 import { getFxHistory } from "@/lib/fx-live.functions";
 import { FX_RANGES, type FxRangeKey } from "@/lib/fx-ranges";
+import { alignQuoteWithLive, netFxCostBasis } from "@/lib/fx-quote";
 import {
   CATEGORY_LABEL,
   currencyFlag,
@@ -215,18 +216,34 @@ export function FxPairChart({
 
   /** weighted average rate you actually paid, in <base> per 1 <currency> */
   const avgEurPer = useMemo(() => {
-    const buys = myTrades.filter((t) => t.amount > 0);
-    const units = buys.reduce((s, t) => s + t.amount, 0);
-    const spent = buys.reduce((s, t) => s + t.eurAmount, 0);
-    return units > 0 && spent > 0 ? spent / units : undefined;
-  }, [myTrades]);
+    const basis = netFxCostBasis(myTrades, currency);
+    return basis?.basePerCurrency;
+  }, [myTrades, currency]);
 
   const first = data[0]?.value;
   const last = data[data.length - 1]?.value;
   const change = first && last ? (last - first) / first : 0;
 
   const live = liveRate ? (flipped ? 1 / liveRate : liveRate) : undefined;
-  const target = breakEvenEurPer ? (flipped ? breakEvenEurPer : 1 / breakEvenEurPer) : undefined;
+  // Prefer the cost basis of the swaps drawn on this chart — it must agree
+  // with the buy/sell list above. Fall back to the portfolio break-even, but
+  // never let an inverted quote (1.67 vs live 0.87) through.
+  const breakEvenBasePer = useMemo(() => {
+    const fromTrades = avgEurPer;
+    const fromPortfolio = breakEvenEurPer && breakEvenEurPer > 0 ? breakEvenEurPer : undefined;
+    const liveBasePer = liveRate && liveRate > 0 ? 1 / liveRate : undefined;
+    let be = fromTrades ?? fromPortfolio;
+    if (be && liveBasePer) be = alignQuoteWithLive(be, liveBasePer);
+    // If both exist and the portfolio figure is on the wrong side of 1 vs the
+    // trades (or wildly further from live), trust the trades.
+    if (fromTrades && fromPortfolio && liveBasePer) {
+      const tradesFit = Math.abs(Math.log(fromTrades / liveBasePer));
+      const portFit = Math.abs(Math.log(alignQuoteWithLive(fromPortfolio, liveBasePer) / liveBasePer));
+      if (portFit > tradesFit + Math.log(1.05)) be = fromTrades;
+    }
+    return be;
+  }, [avgEurPer, breakEvenEurPer, liveRate]);
+  const target = breakEvenBasePer ? (flipped ? breakEvenBasePer : 1 / breakEvenBasePer) : undefined;
   const avg = avgEurPer ? (flipped ? avgEurPer : 1 / avgEurPer) : undefined;
   const label = flipped ? `${base} per 1 ${currency}` : `${currency} per 1 ${base}`;
 
@@ -438,7 +455,11 @@ export function FxPairChart({
         }),
       );
     }
-    if (avg) {
+    // Skip a second line when average and break-even are the same number
+    // (pure FX cash with no interest) — two labels on one price is noise.
+    const avgDistinct =
+      avg && (!target || Math.abs(Math.log(avg / target)) > Math.log(1.002));
+    if (avgDistinct && avg) {
       linesRef.current.push(
         s.createPriceLine({
           price: avg,
@@ -638,7 +659,7 @@ export function FxPairChart({
                       })}
                     </p>
                     <p className="num text-[11px] text-muted-foreground">
-                      1 {currency} = {rate4(1 / m.rate)} {base} ·{" "}
+                      1 {currency} = {rate4(flipped ? m.y : 1 / m.y)} {base} ·{" "}
                       {m.eurAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {base}
                     </p>
                     <p className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold">
@@ -715,11 +736,11 @@ export function FxPairChart({
         <p className="mt-2 text-xs text-muted-foreground">
           {flipped
             ? live >= target
-              ? `You're already past break-even: 1 ${currency} is worth ${rate4(live)} ${base} and you only need ${rate4(target)}.`
-              : `Hold until 1 ${currency} is worth at least ${rate4(target)} ${base} to get all your money back (it's ${rate4(live)} today).`
+              ? `You're ahead: 1 ${currency} is worth ${rate4(live)} ${base} and you only need ${rate4(target)} to break even.`
+              : `Don't convert yet — wait until 1 ${currency} is worth at least ${rate4(target)} ${base} (it's ${rate4(live)} today).`
             : live <= target
-              ? `You're already past break-even: 1 ${base} costs ${rate4(live)} ${currency} and you need ${rate4(target)} or less.`
-              : `Hold until 1 ${base} costs ${rate4(target)} ${currency} or less to get all your money back (it's ${rate4(live)} today).`}
+              ? `You're ahead: 1 ${base} costs ${rate4(live)} ${currency} and you need ${rate4(target)} or less to break even.`
+              : `Don't convert yet — wait until 1 ${base} costs ${rate4(target)} ${currency} or less (it's ${rate4(live)} today).`}
         </p>
       ) : null}
     </div>

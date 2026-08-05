@@ -121,9 +121,9 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
                     <Badge variant="secondary" className="rounded-full text-[10px]">
                       {m.investment.currency}
                     </Badge>
-                    {m.investment.currency !== base && m.investment.rateSource !== "manual" && (
+                    {m.investment.currency !== base && (m.rateSource ?? m.investment.rateSource) === "estimated" && (
                       <span
-                        title="The statement didn't say what rate you got, so we used that day's official rate. Edit the position to enter what you really paid."
+                        title="We couldn't trust the rate in the statement, so we used that day's official rate. Edit the position to enter what you really paid."
                         className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary"
                       >
                         rate guessed
@@ -166,11 +166,11 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
                       <>
                         <Cell
                           label={`1 ${base} buys (${m.investment.currency})`}
-                          value={`${rate4(m.liveRate)} now · ${rate4(m.investment.entryRate)} when you bought`}
+                          value={`${rate4(m.liveRate)} now · ${rate4(m.entryRate)} when you bought`}
                         />
                         <Cell
                           label={`1 ${m.investment.currency} buys (${base})`}
-                          value={`${rate4(1 / m.liveRate)} now · ${rate4(1 / m.investment.entryRate)} when you bought`}
+                          value={`${rate4(1 / m.liveRate)} now · ${rate4(1 / m.entryRate)} when you bought`}
                         />
                       </>
                     )}
@@ -216,13 +216,12 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
                     />
                   </div>
 
-                  {m.investment.currency !== base && m.investment.rateSource !== "manual" && (
+                  {m.investment.currency !== base && (m.rateSource ?? m.investment.rateSource) === "estimated" && (
                     <p className="mt-3 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2 text-[11px] text-foreground/90">
-                      Your statement doesn't say what rate you got when your {base} was swapped into{" "}
-                      {m.investment.currency}, so we used the official rate for {m.investment.date}. If you paid
-                      in {base} (e.g. 400 {base} that became {m.investment.currency}), hit{" "}
-                      <strong>Edit</strong> and type that {base} amount into "What you actually paid" — every
-                      number here becomes exact.
+                      We don't have a reliable exchange rate for when this {m.investment.currency} was
+                      bought, so the figures use the official rate around {m.investment.date}. If you
+                      remember what you paid in {base}, hit <strong>Edit</strong> and type that amount
+                      into "What you actually paid" — every number here becomes exact.
                     </p>
                   )}
 
@@ -230,16 +229,14 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
                     <ArrowUpRight className="mt-0.5 size-3 shrink-0" />
                     <span>
                       {m.investment.currency === base
-                        ? `Held in ${base}, so the exchange rate can't hurt this one.`
+                        ? `This one is already in ${base}, so the exchange rate can't change it.`
                         : m.breakEvenGap >= 0
-                          ? `You're above water: cashing out now gives you ${fmt(m.totalPnl)} more than you put in. ` +
-                            `You'd only start losing if 1 ${m.investment.currency} dropped below ${rate4(
+                          ? `Converting back today would leave you ${fmt(m.totalPnl)} ahead of what you paid. ` +
+                            `You only lose if 1 ${m.investment.currency} falls below ${rate4(
                               m.breakEvenEurPer,
                             )} ${base}.`
-                          : `HOLD until 1 ${m.investment.currency} is worth ${rate4(m.breakEvenEurPer)} ${base} to get ` +
-                            `your money back — it's ${rate4(1 / m.liveRate)} today, so you're ${pct(
-                              m.breakEvenGap,
-                            )} away.` +
+                          : `Don't convert yet — wait until 1 ${m.investment.currency} is worth ${rate4(m.breakEvenEurPer)} ${base} ` +
+                            `(it's ${rate4(1 / m.liveRate)} today).` +
                             (m.daysToBreakEven !== null
                               ? ` Even if the rate never moves, interest alone covers the gap in about ${m.daysToBreakEven} days.`
                               : "")}
