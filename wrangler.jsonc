@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pocketforex",
+  "compatibility_date": "2026-08-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/server.ts",
+  "observability": {
+    "enabled": true,
+  },
+  "routes": [
+    {
+      "pattern": "pocketforex.hyperreader.eu",
+      "custom_domain": true,
+    },
+  ],
+}
