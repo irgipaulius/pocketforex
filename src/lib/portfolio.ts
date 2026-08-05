@@ -145,22 +145,27 @@ export function computeMetrics(
   vols: Record<string, number>,
   /** the currency all "Eur"-suffixed figures are denominated in */
   base = "EUR",
+  /** official "1 base = x currency" on the purchase date, when known */
+  dayRate?: number,
 ): Metrics {
   const rawLive = investment.currency === base ? 1 : (liveRates[investment.currency] ?? investment.entryRate);
-  // Stored entry rates are "1 base = x currency". Upside-down quotes are
-  // flipped; garbage cost bases (e.g. 0.34 USD/EUR) fall back to the live
-  // market — unless the user typed the rate in by hand.
+  // Prefer the purchase-day official rate as the compass. Falling back to live
+  // makes "now" and "when you bought" identical — only use it when history is
+  // missing.
+  const reference =
+    investment.currency === base
+      ? 1
+      : dayRate && dayRate > 0
+        ? dayRate
+        : rawLive > 0
+          ? rawLive
+          : investment.entryRate;
   const trustFar = investment.rateSource === "manual";
   const { rate: entryRate, usedMarket } =
     investment.currency === base
       ? { rate: 1, usedMarket: false }
-      : saneCurrencyPerBase(
-          investment.entryRate,
-          rawLive > 0 ? rawLive : investment.entryRate,
-          { trustFar },
-        );
+      : saneCurrencyPerBase(investment.entryRate, reference, { trustFar });
   const liveRate = rawLive > 0 ? rawLive : entryRate;
-  /** Effective source after sanity — implausible statement figures become guesses. */
   const rateSource =
     investment.currency === base
       ? investment.rateSource

@@ -113,6 +113,7 @@ export function evaluate({
   vols,
   money,
   base = "EUR",
+  dayRateFor,
 }: {
   investments: Investment[];
   fxTrades: FxTrade[];
@@ -122,8 +123,12 @@ export function evaluate({
   money: (baseValue: number) => string;
   /** the currency every "…Eur" figure below is actually denominated in */
   base?: string;
+  /** official "1 base = x currency" on a position's purchase date */
+  dayRateFor?: (inv: Investment) => number | undefined;
 }): Evaluation {
-  const positions = investments.map((i) => computeMetrics(i, liveRates, vols, base));
+  const positions = investments.map((i) =>
+    computeMetrics(i, liveRates, vols, base, dayRateFor?.(i)),
+  );
 
   const totals: Totals = {
     investedEur: positions.reduce((s, m) => s + m.entryEur, 0),

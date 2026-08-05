@@ -81,7 +81,7 @@ export function FxSignal({ base, quote, options, onQuoteChange, rate, breakEven,
       />
       <div className="relative flex flex-wrap items-center justify-between gap-2">
         <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <Sparkles className="size-3.5 text-primary" /> Should you convert back?
+          <Sparkles className="size-3.5 text-primary" /> Convert back?
         </p>
         {options.length > 1 && (
           <select

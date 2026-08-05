@@ -26,3 +26,24 @@ export async function fetchTimeseries(from: string, symbols: string[]): Promise<
   const json = (await res.json()) as { rates: Series };
   return json.rates;
 }
+
+/** Nearest "1 EUR = x CCY" on or before `date`. */
+export function rateOnDate(series: Series, date: string, currency: string): number | undefined {
+  if (currency === "EUR") return 1;
+  const days = Object.keys(series).sort();
+  let hit: number | undefined;
+  for (const d of days) {
+    const v = series[d]?.[currency];
+    if (typeof v === "number" && v > 0) {
+      if (d <= date) hit = v;
+      else break;
+    }
+  }
+  if (hit !== undefined) return hit;
+  // Before the series starts — earliest known day is the best guess.
+  for (const d of days) {
+    const v = series[d]?.[currency];
+    if (typeof v === "number" && v > 0) return v;
+  }
+  return undefined;
+}

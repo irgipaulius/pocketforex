@@ -44,8 +44,9 @@ import {
   saveBaseCurrency,
 } from "@/lib/base-currency";
 import { evaluate } from "@/lib/evaluate";
+import { healEntryRates } from "@/lib/heal-rates";
 import { baseRateLookup, rebaseInvestments, rebaseRates, rebaseTrades } from "@/lib/rebase";
-import { fetchCurrencies, fetchLatestRates, fetchTimeseries } from "@/lib/rates";
+import { fetchCurrencies, fetchLatestRates, fetchTimeseries, rateOnDate } from "@/lib/rates";
 import { getFxQuote } from "@/lib/fx-live.functions";
 import { SEO_LINKS, SEO_META, SITE_NAME } from "@/lib/seo";
 
@@ -188,9 +189,28 @@ function Dashboard() {
     staleTime: 60 * 60_000,
   });
 
+  /** Full history covering every purchase date — used to estimate / heal entry rates. */
+  const entryCcys = useMemo(
+    () => Array.from(new Set(investments.map((i) => i.currency).filter((c) => c !== "EUR"))),
+    [investments],
+  );
+  const entryHistory = useQuery({
+    queryKey: ["entry-history", earliest, entryCcys.join(",")],
+    queryFn: () => fetchTimeseries(earliest, entryCcys),
+    enabled: entryCcys.length > 0,
+    staleTime: 60 * 60_000,
+  });
+
+  // Persist purchase-day official rates when statement cost bases were garbage
+  // or an earlier heal wrongly wrote today's live rate into "when you bought".
+  useEffect(() => {
+    if (!hydrated || !entryHistory.data) return;
+    setInvestments((prev) => healEntryRates(prev, entryHistory.data!));
+  }, [hydrated, entryHistory.data]);
+
   const rateAt = useMemo(
-    () => baseRateLookup(base, { ...(history.data ?? {}), ...(baseHistory.data ?? {}) }, liveRates),
-    [base, history.data, baseHistory.data, liveRates],
+    () => baseRateLookup(base, { ...(history.data ?? {}), ...(baseHistory.data ?? {}), ...(entryHistory.data ?? {}) }, liveRates),
+    [base, history.data, baseHistory.data, entryHistory.data, liveRates],
   );
 
   /** Everything is stored euro-based; from here on it is main-currency based. */
@@ -213,11 +233,31 @@ function Dashboard() {
     [basedInvestments, fxOnly, base],
   );
 
+  const dayRateFor = useMemo(() => {
+    const series = { ...(entryHistory.data ?? {}), ...(history.data ?? {}) };
+    return (inv: Investment) => {
+      if (inv.currency === base) return 1;
+      const eurRate = rateOnDate(series, inv.date, inv.currency);
+      if (!eurRate) return undefined;
+      if (base === "EUR") return eurRate;
+      const baseEur = rateAt(inv.date);
+      return baseEur > 0 ? eurRate / baseEur : undefined;
+    };
+  }, [entryHistory.data, history.data, base, rateAt]);
+
   /** ONE evaluation for the whole page — every widget below reads from it. */
   const evaluation = useMemo(
     () =>
-      evaluate({ investments: shown, fxTrades: basedTrades, liveRates: baseRates, vols, money: fmt, base }),
-    [shown, basedTrades, baseRates, vols, fmt, base],
+      evaluate({
+        investments: shown,
+        fxTrades: basedTrades,
+        liveRates: baseRates,
+        vols,
+        money: fmt,
+        base,
+        dayRateFor,
+      }),
+    [shown, basedTrades, baseRates, vols, fmt, base, dayRateFor],
   );
   const { positions: metrics, totals, allocation, pairOptions } = evaluation;
 
@@ -241,6 +281,9 @@ function Dashboard() {
   const series: ValuePoint[] = useMemo(() => {
     const data = history.data;
     if (!data || shown.length === 0) return [];
+    // Use the same sanitized entry rates as the positions table — raw statement
+    // garbage here is what made the FX-impact chart invent multi-k€ losses.
+    const entryById = new Map(metrics.map((m) => [m.investment.id, m.entryRate]));
     return Object.keys(data)
       .sort()
       .map((day) => {
@@ -254,13 +297,14 @@ function Dashboard() {
           if (!eurRate || !dayBase) continue;
           // "1 EUR = x CCY" becomes "1 <base> = x CCY" for that very day.
           const rate = eurRate / dayBase;
+          const entry = entryById.get(inv.id) ?? inv.entryRate;
           live += value / rate;
-          frozen += value / inv.entryRate;
+          frozen += value / entry;
         }
         return { date: day.slice(5), live, frozen, fx: live - frozen };
       })
       .filter((p) => p.live > 0);
-  }, [history.data, shown, base]);
+  }, [history.data, shown, base, metrics]);
 
   /** Any currency can be the main one — yours are listed first. */
   const allCurrencies = useQuery({
@@ -520,38 +564,33 @@ function Dashboard() {
       </header>
 
 
-      <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl bg-secondary/50 px-4 py-2.5">
-        <div>
-          <p className="text-xs font-semibold">Only show foreign currency</p>
-          <p className="text-[11px] text-muted-foreground">
-            Hide money already in {base}. What's left is what the exchange rate can still move.
-          </p>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={fxOnly}
-          aria-label="Show foreign currency holdings only"
-          onClick={() => setFxOnly((v) => !v)}
-          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${fxOnly ? "bg-primary" : "bg-muted"}`}
-        >
-          <span
-            className={`absolute top-0.5 size-5 rounded-full bg-background transition-all ${fxOnly ? "left-[22px]" : "left-0.5"}`}
-          />
-        </button>
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={fxOnly}
+            aria-label="Show foreign currency holdings only"
+            onClick={() => setFxOnly((v) => !v)}
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${fxOnly ? "bg-primary" : "bg-muted"}`}
+          >
+            <span
+              className={`absolute top-0.5 size-4 rounded-full bg-background transition-all ${fxOnly ? "left-[18px]" : "left-0.5"}`}
+            />
+          </button>
+          Foreign currency only
+        </label>
       </div>
 
-
-
-      <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="What you paid" value={fmt(totals.investedEur)} />
+      <section className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Stat label="Paid in" value={fmt(totals.investedEur)} />
         <Stat
-          label="Exchange rate effect"
+          label="FX effect"
           value={fmt(totals.fxPnlEur)}
           tone={totals.fxPnlEur >= 0 ? "gain" : "loss"}
         />
         <Stat
-          label="Investment growth"
+          label="Growth"
           value={fmt(totals.assetPnlEur)}
           tone={totals.assetPnlEur >= 0 ? "gain" : "loss"}
         />
@@ -639,26 +678,16 @@ function Dashboard() {
 
           <div className="mt-4 grid gap-4 lg:grid-cols-5">
             <div className="surface p-4 lg:col-span-3">
-              <h3 className="text-sm font-bold">How much the exchange rate moved you</h3>
-              <p className="mb-2 text-xs text-muted-foreground">
-                Ignoring interest and stock prices — only the currency.
-              </p>
+              <h3 className="text-sm font-bold">FX effect over time</h3>
               <FxImpactChart data={series} fmt={fmt} currency={base} />
             </div>
             <div className="surface p-4 lg:col-span-2">
-              <h3 className="text-sm font-bold">Split by currency</h3>
-              <p className="mb-2 text-xs text-muted-foreground">
-                What your money is worth in {base}, per currency.
-              </p>
+              <h3 className="text-sm font-bold">By currency</h3>
               <AllocationChart data={allocation} fmt={fmt} />
             </div>
           </div>
 
           <h2 className="mt-8 text-base font-bold">Your positions</h2>
-          <p className="text-xs text-muted-foreground">
-            Each holding keeps its own purchase date and exchange rate — so a USD savings pot and a
-            stock buy aren't mashed into one average.
-          </p>
           <PositionsTable
             fmt={fmt}
             base={base}

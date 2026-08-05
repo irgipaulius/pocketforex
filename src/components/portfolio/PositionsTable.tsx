@@ -1,10 +1,9 @@
 import { useMemo, useState } from "react";
-import { ArrowUpRight, ChevronDown, Pencil, Search, Trash2 } from "lucide-react";
+import { ChevronDown, Info, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { InvestmentForm } from "@/components/portfolio/InvestmentForm";
-import { eur, maturityLabel, pct, rate4, type Investment, type Metrics } from "@/lib/portfolio";
+import { eur, pct, rate4, type Investment, type Metrics } from "@/lib/portfolio";
 
 type SortKey = "date" | "name" | "value" | "pnl";
 
@@ -12,27 +11,17 @@ type Props = {
   metrics: Metrics[];
   onSave: (inv: Investment) => void;
   onDelete: (id: string) => void;
-  /** the currency every converted figure is shown in */
   base?: string;
-  /** formats an amount already in the main currency */
   fmt?: (n: number) => string;
 };
 
 export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "EUR" }: Props) {
-  const [sort, setSort] = useState<SortKey>("date");
+  const [sort, setSort] = useState<SortKey>("value");
   const [dir, setDir] = useState<1 | -1>(-1);
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const [q, setQ] = useState("");
 
   const rows = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const list = metrics.filter(
-      (m) =>
-        !needle ||
-        m.investment.name.toLowerCase().includes(needle) ||
-        m.investment.currency.toLowerCase().includes(needle),
-    );
-    return list.sort((a, b) => {
+    return metrics.slice().sort((a, b) => {
       const v =
         sort === "date"
           ? a.investment.date.localeCompare(b.investment.date)
@@ -43,7 +32,7 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
               : a.totalPnl - b.totalPnl;
       return v * dir;
     });
-  }, [metrics, sort, dir, q]);
+  }, [metrics, sort, dir]);
 
   const toggle = (id: string) =>
     setOpen((prev) => {
@@ -55,6 +44,7 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
 
   const head = (key: SortKey, label: string, className = "") => (
     <button
+      type="button"
       onClick={() => {
         if (sort === key) setDir((d) => (d === 1 ? -1 : 1));
         else {
@@ -75,77 +65,65 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
 
   return (
     <div className="surface mt-3 overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2.5">
-        <p className="text-xs text-muted-foreground">
-          <span className="num font-semibold text-foreground">{rows.length}</span> position
-          {rows.length === 1 ? "" : "s"} · tap a row for the details
-        </p>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search name or currency"
-            className="h-8 w-52 rounded-full pl-8 text-xs"
-          />
-        </div>
-      </div>
-
       <div className="grid grid-cols-[1fr_auto_auto] items-center gap-3 border-b border-border/60 bg-secondary/40 px-3 py-2">
         <div className="flex items-center gap-3">
           {head("name", "Position")}
           {head("date", "Bought")}
         </div>
-        {head("value", "Worth now", "justify-end")}
-        {head("pnl", "Profit", "justify-end")}
+        {head("value", "Worth", "justify-end")}
+        {head("pnl", "P&L", "justify-end")}
       </div>
 
       <div className="max-h-[520px] overflow-y-auto">
         {rows.map((m) => {
-          const mat = maturityLabel(m.maturity);
           const isOpen = open.has(m.investment.id);
+          const estimated = (m.rateSource ?? m.investment.rateSource) === "estimated";
+          const foreign = m.investment.currency !== base;
           return (
             <div key={m.investment.id} className="border-b border-border/40 last:border-0">
               <button
+                type="button"
                 onClick={() => toggle(m.investment.id)}
                 className="grid w-full grid-cols-[1fr_auto_auto] items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-secondary/40"
               >
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     <ChevronDown
                       className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${
                         isOpen ? "rotate-180" : ""
                       }`}
                     />
                     <span className="truncate text-sm font-semibold">{m.investment.name}</span>
-                    <Badge variant="secondary" className="rounded-full text-[10px]">
-                      {m.investment.currency}
-                    </Badge>
-                    {m.investment.currency !== base && (m.rateSource ?? m.investment.rateSource) === "estimated" && (
-                      <span
-                        title="We couldn't trust the rate in the statement, so we used that day's official rate. Edit the position to enter what you really paid."
-                        className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary"
-                      >
-                        rate guessed
-                      </span>
+                    <span className="text-[11px] text-muted-foreground">{m.investment.currency}</span>
+                    {estimated && foreign && (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            className="inline-flex text-muted-foreground hover:text-foreground"
+                            aria-label="Rate estimated from that day's market"
+                          >
+                            <Info className="size-3.5" />
+                          </span>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          className="w-64 text-xs leading-relaxed"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Exchange rate for {m.investment.date} estimated from the official FX feed
+                          for that day. Edit the position and enter what you actually paid for an
+                          exact figure.
+                        </PopoverContent>
+                      </Popover>
                     )}
-                    <span
-                      className={`hidden rounded-full px-2 py-0.5 text-[10px] font-semibold sm:inline ${
-                        mat.tone === "good"
-                          ? "bg-gain/15 text-gain"
-                          : mat.tone === "warn"
-                            ? "bg-primary/15 text-primary"
-                            : mat.tone === "bad"
-                              ? "bg-loss/15 text-loss"
-                              : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {mat.label}
-                    </span>
                   </div>
                   <p className="num mt-0.5 pl-6 text-[11px] text-muted-foreground">
                     {m.investment.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}{" "}
-                    {m.investment.currency} · {m.investment.date} · {m.holdingDays}d
+                    {m.investment.currency} · {m.investment.date}
                   </p>
                 </div>
                 <p className="num text-right text-sm font-semibold">{fmt(m.nowEur)}</p>
@@ -160,90 +138,46 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
               </button>
 
               {isOpen && (
-                <div className="animate-fade-in bg-secondary/25 px-3 pb-4 pt-1">
-                  <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                    {m.investment.currency !== base && (
-                      <>
-                        <Cell
-                          label={`1 ${base} buys (${m.investment.currency})`}
-                          value={`${rate4(m.liveRate)} now · ${rate4(m.entryRate)} when you bought`}
-                        />
-                        <Cell
-                          label={`1 ${m.investment.currency} buys (${base})`}
-                          value={`${rate4(1 / m.liveRate)} now · ${rate4(1 / m.entryRate)} when you bought`}
-                        />
-                      </>
-                    )}
-                    <Cell
-                      label="Worth today"
-                      value={`${m.currentValue.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${
-                        m.investment.currency
-                      } = ${fmt(m.nowEur)}`}
-                    />
-                    <Cell
-                      label="Currency effect"
-                      value={`${fmt(m.fxPnl)} (${pct(m.fxPct)})`}
-                      tone={m.fxPnl >= 0 ? "gain" : "loss"}
-                    />
-                    {m.investment.interestRate !== undefined && (
-                      <Cell
-                        label={`Interest ${(m.investment.interestRate * 100).toFixed(2)}%/yr`}
-                        value={`+${m.interestEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${
-                          m.investment.currency
-                        }`}
-                        tone="gain"
+                <div className="animate-fade-in space-y-3 bg-secondary/25 px-3 pb-4 pt-1">
+                  {foreign ? (
+                    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+                      <Row
+                        label={`1 ${m.investment.currency} in ${base}`}
+                        value={`${rate4(1 / m.liveRate)} now · ${rate4(1 / m.entryRate)} bought`}
                       />
-                    )}
-                    {m.investment.currency !== base && (
-                      <Cell
-                        label="Break even at"
+                      <Row
+                        label="Currency effect"
+                        value={`${fmt(m.fxPnl)} (${pct(m.fxPct)})`}
+                        tone={m.fxPnl >= 0 ? "gain" : "loss"}
+                      />
+                      <Row
+                        label="Break even"
                         value={`1 ${m.investment.currency} = ${rate4(m.breakEvenEurPer)} ${base}`}
                         tone={m.breakEvenGap >= 0 ? "gain" : "loss"}
                       />
-                    )}
-                    <Cell
-                      label="Usual currency wobble"
-                      value={`±${(m.fxNoise * 100).toFixed(1)}%`}
-                    />
-                  </dl>
-
-                  <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-                    <div
-                      className={`h-full rounded-full transition-all duration-500 ${
-                        m.maturity >= 0 ? "bg-gain" : "bg-loss"
-                      }`}
-                      style={{ width: `${Math.min(100, Math.abs(m.maturity) * 50)}%` }}
-                    />
-                  </div>
-
-                  {m.investment.currency !== base && (m.rateSource ?? m.investment.rateSource) === "estimated" && (
-                    <p className="mt-3 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2 text-[11px] text-foreground/90">
-                      We don't have a reliable exchange rate for when this {m.investment.currency} was
-                      bought, so the figures use the official rate around {m.investment.date}. If you
-                      remember what you paid in {base}, hit <strong>Edit</strong> and type that amount
-                      into "What you actually paid" — every number here becomes exact.
+                      {m.investment.interestRate !== undefined && (
+                        <Row
+                          label="Interest"
+                          value={`+${m.interestEarned.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${m.investment.currency}`}
+                          tone="gain"
+                        />
+                      )}
+                    </dl>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      Already in {base} — exchange rate doesn't move this one.
                     </p>
                   )}
 
-                  <p className="mt-2 flex items-start gap-1 text-[11px] text-muted-foreground">
-                    <ArrowUpRight className="mt-0.5 size-3 shrink-0" />
-                    <span>
-                      {m.investment.currency === base
-                        ? `This one is already in ${base}, so the exchange rate can't change it.`
-                        : m.breakEvenGap >= 0
-                          ? `Converting back today would leave you ${fmt(m.totalPnl)} ahead of what you paid. ` +
-                            `You only lose if 1 ${m.investment.currency} falls below ${rate4(
-                              m.breakEvenEurPer,
-                            )} ${base}.`
-                          : `Don't convert yet — wait until 1 ${m.investment.currency} is worth ${rate4(m.breakEvenEurPer)} ${base} ` +
-                            `(it's ${rate4(1 / m.liveRate)} today).` +
-                            (m.daysToBreakEven !== null
-                              ? ` Even if the rate never moves, interest alone covers the gap in about ${m.daysToBreakEven} days.`
-                              : "")}
-                    </span>
-                  </p>
+                  {foreign && (
+                    <p className="text-[11px] text-muted-foreground">
+                      {m.breakEvenGap >= 0
+                        ? `Converting back today: about ${fmt(m.totalPnl)} ahead.`
+                        : `Wait until 1 ${m.investment.currency} ≥ ${rate4(m.breakEvenEurPer)} ${base} (now ${rate4(1 / m.liveRate)}).`}
+                    </p>
+                  )}
 
-                  <div className="mt-3 flex justify-end gap-2">
+                  <div className="flex justify-end gap-1">
                     <InvestmentForm
                       base={base}
                       initial={m.investment}
@@ -269,21 +203,27 @@ export function PositionsTable({ metrics, onSave, onDelete, fmt = eur, base = "E
           );
         })}
         {rows.length === 0 && (
-          <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-            Nothing matches “{q}”.
-          </p>
+          <p className="px-3 py-8 text-center text-xs text-muted-foreground">No positions yet.</p>
         )}
       </div>
     </div>
   );
 }
 
-function Cell({ label, value, tone }: { label: string; value: string; tone?: "gain" | "loss" }) {
+function Row({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "gain" | "loss";
+}) {
   return (
-    <div className="rounded-xl bg-background/60 px-3 py-2">
+    <div>
       <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd
-        className={`num font-semibold ${tone === "gain" ? "text-gain" : tone === "loss" ? "text-loss" : ""}`}
+        className={`num mt-0.5 font-semibold ${tone === "gain" ? "text-gain" : tone === "loss" ? "text-loss" : ""}`}
       >
         {value}
       </dd>
