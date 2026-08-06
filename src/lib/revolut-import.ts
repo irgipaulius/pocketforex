@@ -609,9 +609,60 @@ export function parseAccountTransfers(rows: string[][]): ImportedItem[] {
   return out;
 }
 
+/** Same day + currency + nearly-equal amount = one swap, even across parsers/files. */
+export function dedupeFxTrades(trades: ParsedFxTrade[]): ParsedFxTrade[] {
+  const out: ParsedFxTrade[] = [];
+  for (const t of trades) {
+    const i = out.findIndex(
+      (e) =>
+        e.date === t.date &&
+        e.currency === t.currency &&
+        Math.sign(e.amount) === Math.sign(t.amount) &&
+        Math.abs(Math.abs(e.amount) - Math.abs(t.amount)) < 0.51,
+    );
+    if (i < 0) {
+      out.push(t);
+      continue;
+    }
+    const prev = out[i]!;
+    // Prefer the leg that already has a real rate + EUR figure.
+    const score = (x: ParsedFxTrade) =>
+      (x.rateUnknown ? 0 : 2) + (x.eurAmount > 0 ? 1 : 0) + (x.rate > 0 ? 1 : 0);
+    if (score(t) > score(prev)) out[i] = t;
+  }
+  return out;
+}
+
 export function parseRevolutFxTrades(csv: string): ParsedFxTrade[] {
   const rows = csv.split(/\r?\n/).map(parseRow);
-  return [...parseExchangeRows(rows), ...parseTradeCashRows(rows), ...parseAccountExchanges(rows)];
+  return dedupeFxTrades([
+    ...parseExchangeRows(rows),
+    ...parseTradeCashRows(rows),
+    ...parseAccountExchanges(rows),
+  ]);
+}
+
+/**
+ * Account statement: Exchange +1000 USD then "To Instant Access Savings" −1000 USD
+ * is one conversion + a move — not two purchases. Savings/funds statements then
+ * list the same deposit again as a dated lot.
+ *
+ * Prefer lot-level savings deposits over aggregated `Savings:CCY` buckets from
+ * transfers/summaries so importing both files doesn't double the holding.
+ */
+export function dedupeImportedItems(items: ImportedItem[]): ImportedItem[] {
+  const savingsLotCcys = new Set<string>();
+  for (const it of items) {
+    if (it.key.startsWith("savings-deposit:")) savingsLotCcys.add(it.currency);
+  }
+  if (savingsLotCcys.size === 0) return items;
+
+  return items.filter((it) => {
+    if (it.key.startsWith("savings-deposit:") || it.key.startsWith("trade:")) return true;
+    // Aggregated savings/transfer buckets share keys like "Savings:USD"
+    if (it.bucket === "Savings" && savingsLotCcys.has(it.currency)) return false;
+    return true;
+  });
 }
 
 
@@ -703,6 +754,7 @@ export function parseRevolutStatement(csv: string): ImportedItem[] {
   const rows = csv.split(/\r?\n/).map(parseRow);
   const trades = parseTradeRows(rows);
   const accountTransfers = parseAccountTransfers(rows);
+  const swaps = parseRevolutFxTrades(csv);
   const items = [
     ...parseSummaries(rows),
     ...parseSavingsRows(rows),
@@ -714,16 +766,15 @@ export function parseRevolutStatement(csv: string): ImportedItem[] {
   // A foreign-currency holding was paid for with euros that were swapped
   // first. Use the rate of those swaps, weighted by size, instead of the
   // official rate of the day.
-  const swaps = parseRevolutFxTrades(csv).filter((t) => t.amount > 0);
+  const buySwaps = swaps.filter((t) => t.amount > 0 && t.eurAmount > 0 && t.rate > 0);
   for (const it of items) {
     if (it.currency === "EUR" || it.entryRate) continue;
-    const mine = swaps.filter((s) => s.currency === it.currency);
+    const mine = buySwaps.filter((s) => s.currency === it.currency);
     if (mine.length === 0) continue;
     const bought = mine.reduce((sum, s) => sum + s.amount, 0);
     const spent = mine.reduce((sum, s) => sum + s.eurAmount, 0);
     if (bought > 0 && spent > 0) it.entryRate = bought / spent;
   }
-
 
   // Merge by key: the biggest balance wins, but details (interest rate,
   // opening date, EUR value) are kept from whichever row happens to have them.
@@ -754,9 +805,9 @@ export function parseRevolutStatement(csv: string): ImportedItem[] {
     if (entryRate !== undefined) merged.entryRate = entryRate;
     else delete merged.entryRate;
     map.set(it.key, merged);
-
   }
-  return Array.from(map.values()).filter((i) => i.amount > 0);
+
+  return dedupeImportedItems(Array.from(map.values()).filter((i) => i.amount > 0));
 }
 
 

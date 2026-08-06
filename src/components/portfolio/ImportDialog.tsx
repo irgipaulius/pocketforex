@@ -12,7 +12,12 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { ImportInstructions } from "@/components/portfolio/ImportInstructions";
-import { parseRevolutStatement, parseRevolutFxTrades, type ImportedItem } from "@/lib/revolut-import";
+import {
+  dedupeFxTrades,
+  parseRevolutStatement,
+  parseRevolutFxTrades,
+  type ImportedItem,
+} from "@/lib/revolut-import";
 import type { FxTrade } from "@/lib/fx-trades";
 import type { Investment } from "@/lib/portfolio";
 import { isImplausibleRate, saneCurrencyPerBase } from "@/lib/fx-quote";
@@ -86,7 +91,12 @@ export function ImportDialog({ onImport, trigger }: Props) {
       });
     }
 
-    const fx = [...exact, ...filled].map((t) => ({ id: crypto.randomUUID(), ...t }));
+    // One more pass after filling gaps — account + funds files often list the
+    // same Exchange twice (once per account currency).
+    const fx = dedupeFxTrades([...exact, ...filled]).map((t) => ({
+      id: crypto.randomUUID(),
+      ...t,
+    }));
     setBusy(false);
     setTrades(fx);
     if (parsed.length === 0 && fx.length === 0) {

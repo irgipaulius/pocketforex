@@ -12,17 +12,10 @@ import {
   Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { InvestmentForm } from "@/components/portfolio/InvestmentForm";
 import { ImportDialog } from "@/components/portfolio/ImportDialog";
 import { FxPairChart } from "@/components/portfolio/FxPairChart";
-import {
-  AllocationChart,
-  FxImpactChart,
-  ValueChart,
-  type ValuePoint,
-} from "@/components/portfolio/Charts";
 import { PositionsTable } from "@/components/portfolio/PositionsTable";
 
 import {
@@ -36,7 +29,6 @@ import {
 } from "@/lib/portfolio";
 import { loadFxTrades, mergeFxTrades, saveFxTrades, type FxTrade } from "@/lib/fx-trades";
 import { FxSignal } from "@/components/portfolio/FxSignal";
-import { FxCrossRates } from "@/components/portfolio/FxCrossRates";
 import {
   inferBaseCurrency,
   loadBaseCurrency,
@@ -93,19 +85,22 @@ const DEMO_INVESTMENTS: Investment[] = [
   },
 ];
 
-
-const RANGES = { "1M": 30, "6M": 182, "1Y": 365, "3Y": 1095 } as const;
-type RangeKey = keyof typeof RANGES;
+/** Snap noisy live ticks so P&L doesn't flicker every fraction of a cent. */
+function stabilizeRates(rates: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(rates)) {
+    if (Number.isFinite(v) && v > 0) out[k] = Math.round(v * 10_000) / 10_000;
+  }
+  return out;
+}
 
 function Dashboard() {
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [fxTrades, setFxTrades] = useState<FxTrade[]>([]);
   const [hydrated, setHydrated] = useState(false);
-  const [range, setRange] = useState<RangeKey>("1Y");
   const [pairCcy, setPairCcy] = useState<string | null>(null);
   const [base, setBase] = useState("EUR");
   const [fxOnly, setFxOnly] = useState(false);
-
 
   useEffect(() => {
     const inv = loadInvestments();
@@ -140,7 +135,7 @@ function Dashboard() {
     refetchOnWindowFocus: true,
   });
 
-  /** Second-by-second market rates, layered on top of the daily reference rates. */
+  /** Market rates — refreshed slowly on purpose. Sub-second ticks just flicker P&L. */
   const quoteCcys = useMemo(
     () => (currencies.some((c) => c !== "EUR") ? currencies : ["USD"]),
     [currencies],
@@ -149,31 +144,18 @@ function Dashboard() {
   const tick = useQuery({
     queryKey: ["fx-tick", quoteCcys.join(","), base],
     queryFn: () => getFxQuote({ data: { currencies: [...quoteCcys, base], base: "EUR" } }),
-    refetchInterval: 1000,
+    refetchInterval: 30_000,
     refetchIntervalInBackground: false,
-    staleTime: 0,
+    staleTime: 25_000,
   });
 
   const liveRates = useMemo(
-    () => ({ ...(rates.data?.rates ?? {}), ...(tick.data?.rates ?? {}) }),
+    () => stabilizeRates({ ...(rates.data?.rates ?? {}), ...(tick.data?.rates ?? {}) }),
     [rates.data, tick.data],
   );
 
   /** Every figure below is already denominated in the main currency. */
   const fmt = useMemo(() => (v: number) => money(v, base), [base]);
-
-  const historyFrom = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - RANGES[range]);
-    return d.toISOString().slice(0, 10);
-  }, [range]);
-
-  const history = useQuery({
-    queryKey: ["history", historyFrom, currencies.join(","), base],
-    queryFn: () => fetchTimeseries(historyFrom, [...currencies, base]),
-    enabled: currencies.length > 0,
-    refetchInterval: 5 * 60_000,
-  });
 
   /** Oldest thing on record — how far back we need EUR→main-currency rates. */
   const earliest = useMemo(() => {
@@ -208,8 +190,27 @@ function Dashboard() {
     setInvestments((prev) => healEntryRates(prev, entryHistory.data!));
   }, [hydrated, entryHistory.data]);
 
+  /** ~1Y of history for FX volatility in the verdict — not drawn as a chart. */
+  const volFrom = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 365);
+    return d.toISOString().slice(0, 10);
+  }, []);
+
+  const history = useQuery({
+    queryKey: ["history", volFrom, currencies.join(","), base],
+    queryFn: () => fetchTimeseries(volFrom, [...currencies, base]),
+    enabled: currencies.length > 0,
+    staleTime: 5 * 60_000,
+  });
+
   const rateAt = useMemo(
-    () => baseRateLookup(base, { ...(history.data ?? {}), ...(baseHistory.data ?? {}), ...(entryHistory.data ?? {}) }, liveRates),
+    () =>
+      baseRateLookup(
+        base,
+        { ...(history.data ?? {}), ...(baseHistory.data ?? {}), ...(entryHistory.data ?? {}) },
+        liveRates,
+      ),
     [base, history.data, baseHistory.data, entryHistory.data, liveRates],
   );
 
@@ -259,7 +260,7 @@ function Dashboard() {
       }),
     [shown, basedTrades, baseRates, vols, fmt, base, dayRateFor],
   );
-  const { positions: metrics, totals, allocation, pairOptions } = evaluation;
+  const { positions: metrics, totals, pairOptions } = evaluation;
 
   /** The empty-state example: same engine, same live rate, sample trades. */
   const demoUsd = useMemo(
@@ -274,37 +275,6 @@ function Dashboard() {
       }).byCurrency.get("USD") ?? null,
     [liveRates, vols],
   );
-
-
-
-
-  const series: ValuePoint[] = useMemo(() => {
-    const data = history.data;
-    if (!data || shown.length === 0) return [];
-    // Use the same sanitized entry rates as the positions table — raw statement
-    // garbage here is what made the FX-impact chart invent multi-k€ losses.
-    const entryById = new Map(metrics.map((m) => [m.investment.id, m.entryRate]));
-    return Object.keys(data)
-      .sort()
-      .map((day) => {
-        let live = 0;
-        let frozen = 0;
-        for (const inv of shown) {
-          if (inv.date > day) continue;
-          const value = inv.currentValue ?? inv.amount;
-          const dayBase = base === "EUR" ? 1 : data[day]?.[base];
-          const eurRate = inv.currency === "EUR" ? 1 : data[day]?.[inv.currency];
-          if (!eurRate || !dayBase) continue;
-          // "1 EUR = x CCY" becomes "1 <base> = x CCY" for that very day.
-          const rate = eurRate / dayBase;
-          const entry = entryById.get(inv.id) ?? inv.entryRate;
-          live += value / rate;
-          frozen += value / entry;
-        }
-        return { date: day.slice(5), live, frozen, fx: live - frozen };
-      })
-      .filter((p) => p.live > 0);
-  }, [history.data, shown, base, metrics]);
 
   /** Any currency can be the main one — yours are listed first. */
   const allCurrencies = useQuery({
@@ -335,7 +305,6 @@ function Dashboard() {
   );
   const activePair = pairCcy && chartOptions.includes(pairCcy) ? pairCcy : (chartOptions[0] ?? null);
   const activeInfo = activePair ? (evaluation.byCurrency.get(activePair) ?? null) : null;
-
 
   /** Forms and tables work in the main currency; storage stays euro-based. */
   const toStored = (inv: Investment): Investment => {
@@ -420,11 +389,10 @@ function Dashboard() {
                 3
               </span>
               <span>
-                <span className="font-semibold text-foreground">What moved the needle</span>
+                <span className="font-semibold text-foreground">Buy more or sell?</span>
                 <span className="text-muted-foreground">
                   {" "}
-                  — how much came from interest or stock growth vs the exchange rate helping or
-                  hurting.
+                  — whether today favours converting back or adding to the foreign position.
                 </span>
               </span>
             </li>
@@ -477,7 +445,6 @@ function Dashboard() {
               />
             </>
           )}
-          <FxCrossRates currencies={["EUR", "USD", "GBP", "CHF", "JPY"]} />
           <p className="mt-3 text-center text-[12px] text-muted-foreground">
             Same live rate and maths your import will use — sample buys and sells only.
           </p>
@@ -563,7 +530,6 @@ function Dashboard() {
         </div>
       </header>
 
-
       <div className="mt-4 flex items-center justify-between gap-3">
         <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
           <button
@@ -617,7 +583,6 @@ function Dashboard() {
             currency={activePair}
             base={base}
             options={chartOptions}
-
             onCurrencyChange={setPairCcy}
             {...(activeInfo?.live ? { liveRate: activeInfo.live } : {})}
             {...(activeInfo?.breakEvenEurPer
@@ -627,8 +592,6 @@ function Dashboard() {
           />
         </div>
       )}
-
-      <FxCrossRates currencies={[base, ...pairOptions]} />
 
       {shown.length === 0 ? (
         <div className="surface mt-6 p-10 text-center">
@@ -659,34 +622,6 @@ function Dashboard() {
         </div>
       ) : (
         <>
-          <div className="mt-6 flex items-center justify-between">
-            <h2 className="text-base font-bold">Value over time</h2>
-            <Tabs value={range} onValueChange={(v) => setRange(v as RangeKey)}>
-              <TabsList className="rounded-full">
-                {Object.keys(RANGES).map((r) => (
-                  <TabsTrigger key={r} value={r} className="rounded-full text-xs">
-                    {r}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-          </div>
-
-          <div className="surface mt-3 p-3 pt-5">
-            <ValueChart data={series} fmt={fmt} currency={base} />
-          </div>
-
-          <div className="mt-4 grid gap-4 lg:grid-cols-5">
-            <div className="surface p-4 lg:col-span-3">
-              <h3 className="text-sm font-bold">FX effect over time</h3>
-              <FxImpactChart data={series} fmt={fmt} currency={base} />
-            </div>
-            <div className="surface p-4 lg:col-span-2">
-              <h3 className="text-sm font-bold">By currency</h3>
-              <AllocationChart data={allocation} fmt={fmt} />
-            </div>
-          </div>
-
           <h2 className="mt-8 text-base font-bold">Your positions</h2>
           <PositionsTable
             fmt={fmt}

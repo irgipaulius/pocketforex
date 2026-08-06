@@ -12,42 +12,16 @@ import {
   type ISeriesApi,
   type IPriceLine,
   type ISeriesMarkersPluginApi,
+  type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import {
-  Banknote,
-  Bitcoin,
-  CandlestickChart,
-  Landmark,
-  Layers,
-  PiggyBank,
-  ScrollText,
-} from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { rate4 } from "@/lib/portfolio";
 import type { FxTrade } from "@/lib/fx-trades";
 import { getFxHistory } from "@/lib/fx-live.functions";
 import { FX_RANGES, type FxRangeKey } from "@/lib/fx-ranges";
 import { alignQuoteWithLive, netFxCostBasis } from "@/lib/fx-quote";
-import {
-  CATEGORY_LABEL,
-  currencyFlag,
-  currencySymbol,
-  inferCategory,
-  type AssetCategory,
-} from "@/lib/currency-meta";
-
-const CATEGORY_ICON: Record<AssetCategory, typeof Banknote> = {
-  cash: Banknote,
-  savings: PiggyBank,
-  fund: Landmark,
-  stock: CandlestickChart,
-  etf: Layers,
-  bond: ScrollText,
-  crypto: Bitcoin,
-};
-
 
 type Props = {
   /** currency to compare against the main currency, e.g. "USD" */
@@ -66,6 +40,18 @@ type Props = {
 };
 
 const RANGE_KEYS = Object.keys(FX_RANGES) as FxRangeKey[];
+
+type TradeMark = {
+  key: string;
+  time: UTCTimestamp;
+  price: number;
+  buy: boolean;
+  amount: number;
+  eurAmount: number;
+  date: string;
+  rate: number;
+  description?: string;
+};
 
 /** Resolve a CSS custom property (oklch etc.) to a plain rgb string. */
 function cssVar(name: string, fallback: string) {
@@ -94,6 +80,22 @@ function withAlpha(rgb: string, alpha: number) {
   return `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${alpha})`;
 }
 
+/** Nearest trade mark within ~1.5 chart bars of a crosshair time. */
+function nearestMark(marks: TradeMark[], t: number, barSec: number): TradeMark | null {
+  if (marks.length === 0) return null;
+  const tol = Math.max(barSec * 1.5, 86_400);
+  let best: TradeMark | null = null;
+  let bestDist = Infinity;
+  for (const m of marks) {
+    const d = Math.abs((m.time as number) - t);
+    if (d < bestDist) {
+      bestDist = d;
+      best = m;
+    }
+  }
+  return best && bestDist <= tol ? best : null;
+}
+
 export function FxPairChart({
   currency,
   base = "EUR",
@@ -104,13 +106,23 @@ export function FxPairChart({
   trades = [],
 }: Props) {
   const [range, setRange] = useState<FxRangeKey>("1Y");
-  const [flipped, setFlipped] = useState(true); // true => show <base> per 1 CCY (e.g. 0.86)
+  /** true => show <base> per 1 CCY (e.g. 0.86 EUR per USD) — the sell-USD orientation */
+  const [flipped, setFlipped] = useState(true);
   const [hover, setHover] = useState<{ value: number; time: number } | null>(null);
+  const [activeMark, setActiveMark] = useState<TradeMark | null>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [pins, setPins] = useState<{ key: string; left: number; top: number }[]>([]);
-  const [openPin, setOpenPin] = useState<string | null>(null);
 
+  const boxRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const linesRef = useRef<IPriceLine[]>([]);
+  const rafRef = useRef<number | null>(null);
+  const lastSigRef = useRef<string>("");
+  const autoZoomedRef = useRef<string | null>(null);
+  const marksRef = useRef<TradeMark[]>([]);
+  const barSecRef = useRef(86_400);
 
   const applyDates = () => {
     const ts = chartRef.current?.timeScale();
@@ -124,22 +136,13 @@ export function FxPairChart({
     });
   };
 
-  const boxRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
-  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const linesRef = useRef<IPriceLine[]>([]);
-  const rafRef = useRef<number | null>(null);
-  const lastSigRef = useRef<string>("");
-  const autoZoomedRef = useRef<string | null>(null);
-
   const q = useQuery({
     queryKey: ["fx-history", currency, range, base],
     queryFn: () => getFxHistory({ data: { currency, range, base } }),
     enabled: currency !== base,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
-    refetchInterval: range === "1D" || range === "1W" ? 15_000 : 5 * 60_000,
+    refetchInterval: range === "1D" || range === "1W" ? 30_000 : 5 * 60_000,
   });
 
   const data = useMemo(() => {
@@ -150,14 +153,13 @@ export function FxPairChart({
     }));
   }, [q.data, flipped]);
 
-  /** every swap of this currency, regardless of the window on screen */
   const myTrades = useMemo(
     () => trades.filter((t) => t.currency === currency),
     [trades, currency],
   );
 
-  /** Your swaps, snapped onto the nearest candle the chart actually has. */
-  const markers = useMemo(() => {
+  /** Buys/sells snapped onto the nearest candle — used for markers + detail panel. */
+  const marks = useMemo((): TradeMark[] => {
     if (data.length === 0) return [];
     const firstT = data[0]!.time as number;
     return myTrades
@@ -172,24 +174,28 @@ export function FxPairChart({
           if ((p.time as number) <= tt) x = p.time as number;
           else break;
         }
-        return {
+        const mark: TradeMark = {
           key: t.id,
-          x,
-          y: flipped ? 1 / t.rate : t.rate,
+          time: x as UTCTimestamp,
+          price: flipped ? 1 / t.rate : t.rate,
           buy: t.amount > 0,
           amount: Math.abs(t.amount),
           eurAmount: t.eurAmount,
           date: t.date,
           rate: t.rate,
-          ...(t.description ? { description: t.description } : {}),
-          category: inferCategory(t.description),
         };
-
+        if (t.description) mark.description = t.description;
+        return mark;
       })
-      .sort((a, b) => a.x - b.x);
+      .sort((a, b) => (a.time as number) - (b.time as number));
   }, [myTrades, data, flipped]);
 
-  /** Zoom the time axis onto the days you actually traded, with some padding. */
+  marksRef.current = marks;
+  barSecRef.current =
+    data.length >= 2
+      ? Math.max(60, ((data[data.length - 1]!.time as number) - (data[0]!.time as number)) / (data.length - 1))
+      : 86_400;
+
   const zoomToTrades = () => {
     const ts = chartRef.current?.timeScale();
     if (!ts || myTrades.length === 0 || data.length < 2) return;
@@ -197,24 +203,21 @@ export function FxPairChart({
     const pad = 7 * 86_400;
     const firstT = data[0]!.time as number;
     const lastT = data[data.length - 1]!.time as number;
-    // stay inside the loaded window — lightweight-charts throws on ranges it has no data for
-    const from = Math.max(firstT, Math.min(...stamps) - pad);
-    const to = Math.min(lastT, Math.max(Math.max(...stamps), lastT) + pad);
-    if (!(to > from)) return;
+    const fromT = Math.max(firstT, Math.min(...stamps) - pad);
+    const toT = Math.min(lastT, Math.max(Math.max(...stamps), lastT) + pad);
+    if (!(toT > fromT)) return;
     setFrom("");
     setTo("");
     try {
-      ts.setVisibleRange({ from: from as UTCTimestamp, to: to as UTCTimestamp });
+      ts.setVisibleRange({ from: fromT as UTCTimestamp, to: toT as UTCTimestamp });
     } catch {
       ts.fitContent();
     }
   };
 
+  const bought = marks.filter((m) => m.buy).reduce((s, m) => s + m.amount, 0);
+  const sold = marks.filter((m) => !m.buy).reduce((s, m) => s + m.amount, 0);
 
-  const bought = markers.filter((m) => m.buy).reduce((s, m) => s + m.amount, 0);
-  const sold = markers.filter((m) => !m.buy).reduce((s, m) => s + m.amount, 0);
-
-  /** weighted average rate you actually paid, in <base> per 1 <currency> */
   const avgEurPer = useMemo(() => {
     const basis = netFxCostBasis(myTrades, currency);
     return basis?.basePerCurrency;
@@ -225,17 +228,12 @@ export function FxPairChart({
   const change = first && last ? (last - first) / first : 0;
 
   const live = liveRate ? (flipped ? 1 / liveRate : liveRate) : undefined;
-  // Prefer the cost basis of the swaps drawn on this chart — it must agree
-  // with the buy/sell list above. Fall back to the portfolio break-even, but
-  // never let an inverted quote (1.67 vs live 0.87) through.
   const breakEvenBasePer = useMemo(() => {
     const fromTrades = avgEurPer;
     const fromPortfolio = breakEvenEurPer && breakEvenEurPer > 0 ? breakEvenEurPer : undefined;
     const liveBasePer = liveRate && liveRate > 0 ? 1 / liveRate : undefined;
     let be = fromTrades ?? fromPortfolio;
     if (be && liveBasePer) be = alignQuoteWithLive(be, liveBasePer);
-    // If both exist and the portfolio figure is on the wrong side of 1 vs the
-    // trades (or wildly further from live), trust the trades.
     if (fromTrades && fromPortfolio && liveBasePer) {
       const tradesFit = Math.abs(Math.log(fromTrades / liveBasePer));
       const portFit = Math.abs(Math.log(alignQuoteWithLive(fromPortfolio, liveBasePer) / liveBasePer));
@@ -245,8 +243,10 @@ export function FxPairChart({
   }, [avgEurPer, breakEvenEurPer, liveRate]);
   const target = breakEvenBasePer ? (flipped ? breakEvenBasePer : 1 / breakEvenBasePer) : undefined;
   const avg = avgEurPer ? (flipped ? avgEurPer : 1 / avgEurPer) : undefined;
-  const label = flipped ? `${base} per 1 ${currency}` : `${currency} per 1 ${base}`;
-
+  const label = flipped ? `1 ${currency} = ? ${base}` : `1 ${base} = ? ${currency}`;
+  const sellHint = flipped
+    ? `Up = ${currency} stronger → better to sell ${currency}`
+    : `Down = ${currency} stronger → better to sell ${currency}`;
 
   // create chart once
   useEffect(() => {
@@ -270,7 +270,7 @@ export function FxPairChart({
       },
       rightPriceScale: {
         borderVisible: false,
-        scaleMargins: { top: 0.18, bottom: 0.12 },
+        scaleMargins: { top: 0.12, bottom: 0.1 },
       },
       timeScale: { borderVisible: false, timeVisible: true, rightOffset: 6, barSpacing: 8 },
       crosshair: {
@@ -314,17 +314,22 @@ export function FxPairChart({
       crosshairMarkerBackgroundColor: primary,
       priceLineVisible: false,
       lastValueVisible: false,
-
       priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
     });
-    markersRef.current = createSeriesMarkers(series, []);
+    markersRef.current = createSeriesMarkers(series, [], { autoScale: true, zOrder: "top" });
     chartRef.current = chart;
     seriesRef.current = series;
 
     chart.subscribeCrosshairMove((param) => {
       const v = param.seriesData.get(series) as { value?: number } | undefined;
-      if (!param.time || !v?.value) setHover(null);
-      else setHover({ value: v.value, time: param.time as number });
+      if (!param.time || !v?.value) {
+        setHover(null);
+        setActiveMark(null);
+        return;
+      }
+      const t = param.time as number;
+      setHover({ value: v.value, time: t });
+      setActiveMark(nearestMark(marksRef.current, t, barSecRef.current));
     });
 
     return () => {
@@ -340,7 +345,6 @@ export function FxPairChart({
   useEffect(() => {
     const s = seriesRef.current;
     if (!s) return;
-    // the chart library needs strictly increasing, unique timestamps
     const clean = [...data]
       .filter((p) => Number.isFinite(p.value) && Number.isFinite(p.time as number))
       .sort((a, b) => (a.time as number) - (b.time as number))
@@ -389,53 +393,37 @@ export function FxPairChart({
     };
   }, [data, currency, range, flipped]);
 
-  // a fresh import brings new swaps: allow the auto-zoom to run again
   useEffect(() => {
     autoZoomedRef.current = null;
   }, [myTrades.length]);
 
-  // the first time your swaps land on the chart, zoom onto them so the
-  // markers are actually visible instead of squeezed against the edge
   useEffect(() => {
-    if (data.length === 0 || markers.length === 0) return;
+    if (data.length === 0 || marks.length === 0) return;
     if (autoZoomedRef.current === currency) return;
     autoZoomedRef.current = currency;
     const id = window.setTimeout(zoomToTrades, 620);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [markers, data, currency]);
+  }, [marks, data, currency]);
 
-
-  // custom pins: the built-in arrow markers are switched off and replaced by
-  // HTML badges positioned over the canvas
+  // Native canvas markers — never steal pointer events from zoom/scrub
   useEffect(() => {
-    const chart = chartRef.current;
-    const s = seriesRef.current;
-    markersRef.current?.setMarkers([]);
-    if (!chart || !s) return;
-    const compute = () => {
-      const ts = chart.timeScale();
-      const next: { key: string; left: number; top: number }[] = [];
-      for (const m of markers) {
-        const x = ts.timeToCoordinate(m.x as UTCTimestamp);
-        const y = s.priceToCoordinate(m.y);
-        if (x == null || y == null) continue;
-        next.push({ key: m.key, left: x as number, top: y as number });
-      }
-      setPins(next);
-    };
-    compute();
-    const ts = chart.timeScale();
-    ts.subscribeVisibleLogicalRangeChange(compute);
-    const ro = new ResizeObserver(compute);
-    if (boxRef.current) ro.observe(boxRef.current);
-    const id = window.setInterval(compute, 400);
-    return () => {
-      ts.unsubscribeVisibleLogicalRangeChange(compute);
-      ro.disconnect();
-      window.clearInterval(id);
-    };
-  }, [markers]);
+    const plugin = markersRef.current;
+    if (!plugin) return;
+    const gain = cssVar("--color-gain", "#16c784");
+    const loss = cssVar("--color-loss", "#ea3943");
+    const seriesMarkers: SeriesMarker<Time>[] = marks.map((m) => ({
+      time: m.time,
+      position: "atPriceMiddle",
+      shape: m.buy ? "arrowUp" : "arrowDown",
+      color: m.buy ? gain : loss,
+      size: 1.25,
+      price: m.price,
+      id: m.key,
+      text: m.buy ? "buy" : "sell",
+    }));
+    plugin.setMarkers(seriesMarkers);
+  }, [marks]);
 
   // break-even + average + live price lines
   useEffect(() => {
@@ -455,10 +443,7 @@ export function FxPairChart({
         }),
       );
     }
-    // Skip a second line when average and break-even are the same number
-    // (pure FX cash with no interest) — two labels on one price is noise.
-    const avgDistinct =
-      avg && (!target || Math.abs(Math.log(avg / target)) > Math.log(1.002));
+    const avgDistinct = avg && (!target || Math.abs(Math.log(avg / target)) > Math.log(1.002));
     if (avgDistinct && avg) {
       linesRef.current.push(
         s.createPriceLine({
@@ -485,7 +470,6 @@ export function FxPairChart({
     }
   }, [target, live, avg, data]);
 
-
   const shown = hover?.value ?? live;
 
   return (
@@ -496,7 +480,9 @@ export function FxPairChart({
             How the {currency}/{base} rate moved
           </h3>
           <p className="text-xs text-muted-foreground">
-            {label} ·{" "}
+            {label} · {sellHint}
+          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
             {hover ? (
               <>
                 <span className="num font-semibold text-foreground">{rate4(hover.value)}</span> on{" "}
@@ -540,7 +526,7 @@ export function FxPairChart({
             onClick={() => setFlipped((f) => !f)}
             className="rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-secondary/70"
           >
-            Flip to {flipped ? `${currency} per 1 ${base}` : `${base} per 1 ${currency}`}
+            Flip to {flipped ? `1 ${base} = ? ${currency}` : `1 ${currency} = ? ${base}`}
           </button>
         </div>
       </div>
@@ -597,86 +583,15 @@ export function FxPairChart({
         )}
       </div>
 
-      {myTrades.length > 0 && markers.length === 0 && data.length > 0 && (
+      {myTrades.length > 0 && marks.length === 0 && data.length > 0 && (
         <p className="mt-2 rounded-xl bg-secondary/50 px-3 py-2 text-[11px] text-muted-foreground">
           Your {myTrades.length} {currency} exchange{myTrades.length > 1 ? "s" : ""} happened before
           this time window — pick a longer range (1Y or MAX) to see the markers.
         </p>
       )}
 
-
       <div className="relative mt-3">
-        <div ref={boxRef} className="h-[340px] w-full max-w-full overflow-hidden touch-pan-y" />
-        <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          {pins.map((p) => {
-            const m = markers.find((x) => x.key === p.key);
-            if (!m) return null;
-            const Icon = CATEGORY_ICON[m.category];
-            const open = openPin === p.key;
-            return (
-              <div
-                key={p.key}
-                className="group pointer-events-auto absolute z-10"
-                style={{ left: p.left, top: p.top, transform: "translate(-50%, -50%)" }}
-                onMouseEnter={() => setOpenPin(p.key)}
-                onMouseLeave={() => setOpenPin((v) => (v === p.key ? null : v))}
-                onClick={() => setOpenPin((v) => (v === p.key ? null : p.key))}
-              >
-                <div
-                  className={`relative flex h-7 min-w-7 items-center justify-center rounded-full border-2 bg-background/95 px-1 leading-none shadow-lg backdrop-blur transition-transform duration-150 hover:scale-110 ${
-                    m.buy ? "border-gain" : "border-loss"
-                  }`}
-                  aria-label={`${m.buy ? "bought" : "sold"} ${currency} on ${m.date}`}
-                >
-                  <span className="text-[11px] font-extrabold">{currencySymbol(currency)}</span>
-                  <span
-                    className="pointer-events-none absolute -left-1 -top-1 text-[10px] leading-none"
-                    aria-hidden
-                  >
-                    {currencyFlag(currency)}
-                  </span>
-
-                  <span
-                    className={`absolute -bottom-1 -right-1 flex size-3.5 items-center justify-center rounded-full text-background ${
-                      m.buy ? "bg-gain" : "bg-loss"
-                    }`}
-                  >
-                    <Icon className="size-2.5" strokeWidth={2.6} />
-                  </span>
-                </div>
-
-                {open && (
-                  <div className="absolute top-[calc(100%+10px)] left-1/2 z-20 w-56 -translate-x-1/2 rounded-xl border border-border bg-popover/95 p-2.5 text-left shadow-xl backdrop-blur">
-                    <p
-                      className={`text-[11px] font-bold ${m.buy ? "text-gain" : "text-loss"}`}
-                    >
-                      {m.buy ? "Bought" : "Sold"} {currencySymbol(currency)}
-                      {m.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {currency}
-                    </p>
-                    <p className="num mt-1 text-[11px] text-muted-foreground">
-                      {new Date(`${m.date}T12:00:00Z`).toLocaleString(undefined, {
-                        dateStyle: "medium",
-                      })}
-                    </p>
-                    <p className="num text-[11px] text-muted-foreground">
-                      1 {currency} = {rate4(flipped ? m.y : 1 / m.y)} {base} ·{" "}
-                      {m.eurAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {base}
-                    </p>
-                    <p className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold">
-                      <Icon className="size-3" /> {CATEGORY_LABEL[m.category]}
-                    </p>
-                    {m.description && (
-                      <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
-                        {m.description}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
+        <div ref={boxRef} className="h-[360px] w-full max-w-full overflow-hidden touch-pan-y" />
         {q.isFetching && data.length === 0 && (
           <div className="absolute inset-0 animate-pulse rounded-xl bg-gradient-to-b from-primary/10 to-transparent" />
         )}
@@ -692,44 +607,45 @@ export function FxPairChart({
         )}
       </div>
 
-      <p className="mt-1 text-[11px] text-muted-foreground">
-        Scroll or pinch to zoom, drag to move around, or set exact dates above.{" "}
-        {q.isError ? "Live history is temporarily unavailable." : ""}
-      </p>
-
-      {markers.length > 0 && (
-        <div className="mt-2 space-y-1">
-          <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-            <span className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-gain" /> you bought {currency}
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-loss" /> you sold {currency}
-            </span>
-            <span className="num">
-              {bought > 0 ? `bought ${Math.round(bought).toLocaleString()} ${currency}` : ""}
-              {bought > 0 && sold > 0 ? " · " : ""}
-              {sold > 0 ? `sold ${Math.round(sold).toLocaleString()} ${currency}` : ""} in this
-              window
-            </span>
+      {/* Stable detail strip — no floating tooltip that leaves the chart */}
+      {activeMark ? (
+        <div
+          className={`mt-2 rounded-xl border px-3 py-2 text-xs ${
+            activeMark.buy ? "border-gain/30 bg-gain/10" : "border-loss/30 bg-loss/10"
+          }`}
+        >
+          <p className={`font-bold ${activeMark.buy ? "text-gain" : "text-loss"}`}>
+            {activeMark.buy ? "Bought" : "Sold"}{" "}
+            {activeMark.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {currency}
           </p>
-          <ul className="num space-y-0.5 text-[11px] text-muted-foreground">
-            {markers
-              .slice()
-              .sort((a, b) => b.date.localeCompare(a.date))
-              .slice(0, 4)
-              .map((m) => (
-                <li key={`row-${m.key}`}>
-                  {m.date} · {m.buy ? "bought" : "sold"}{" "}
-                  <span className="font-semibold text-foreground">
-                    {m.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {currency}
-                  </span>{" "}
-                  for {m.eurAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {base} —
-                  1 {currency} = {rate4(flipped ? m.y : 1 / m.y)} {base}
-                </li>
-              ))}
-          </ul>
+          <p className="num mt-0.5 text-muted-foreground">
+            {activeMark.date} · 1 {currency} = {rate4(flipped ? activeMark.price : 1 / activeMark.price)}{" "}
+            {base} · {activeMark.eurAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}{" "}
+            {base}
+          </p>
+          {activeMark.description ? (
+            <p className="mt-0.5 line-clamp-1 text-muted-foreground">{activeMark.description}</p>
+          ) : null}
         </div>
+      ) : marks.length > 0 ? (
+        <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-gain" /> buy {currency}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-loss" /> sell {currency}
+          </span>
+          <span className="num">
+            {bought > 0 ? `bought ${Math.round(bought).toLocaleString()} ${currency}` : ""}
+            {bought > 0 && sold > 0 ? " · " : ""}
+            {sold > 0 ? `sold ${Math.round(sold).toLocaleString()} ${currency}` : ""}
+          </span>
+          <span className="text-muted-foreground/80">Scrub near a pin to see details</span>
+        </p>
+      ) : (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Scroll or pinch to zoom, drag to pan.
+        </p>
       )}
 
       {target && live ? (
