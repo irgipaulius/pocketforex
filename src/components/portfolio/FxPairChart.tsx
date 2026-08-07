@@ -96,6 +96,35 @@ function nearestMark(marks: TradeMark[], t: number, barSec: number): TradeMark |
   return best && bestDist <= tol ? best : null;
 }
 
+/** Compact label for the pin: 1.2k, 850, 12k… */
+function pinAmount(n: number) {
+  const a = Math.abs(n);
+  if (a >= 10_000) return `${Math.round(a / 1000)}k`;
+  if (a >= 1000) return `${(a / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  if (a >= 100) return String(Math.round(a));
+  return a.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function moneyAmt(n: number) {
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+/**
+ * FX P&L of this lot vs today's rate.
+ * Buy: what those units are worth now minus what you paid.
+ * Sell: what you received minus what those units would be worth now.
+ */
+function markPnlVsNow(
+  m: TradeMark,
+  /** 1 base = liveRate currency */
+  liveRate: number | undefined,
+): { pnl: number; nowWorth: number } | null {
+  if (!liveRate || liveRate <= 0 || m.amount <= 0) return null;
+  const nowWorth = m.amount / liveRate;
+  const pnl = m.buy ? nowWorth - m.eurAmount : m.eurAmount - nowWorth;
+  return { pnl, nowWorth };
+}
+
 export function FxPairChart({
   currency,
   base = "EUR",
@@ -406,7 +435,7 @@ export function FxPairChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marks, data, currency]);
 
-  // Native canvas markers — never steal pointer events from zoom/scrub
+  // Native canvas dots + amount — never steal pointer events from zoom/scrub
   useEffect(() => {
     const plugin = markersRef.current;
     if (!plugin) return;
@@ -414,13 +443,14 @@ export function FxPairChart({
     const loss = cssVar("--color-loss", "#ea3943");
     const seriesMarkers: SeriesMarker<Time>[] = marks.map((m) => ({
       time: m.time,
-      position: "atPriceMiddle",
-      shape: m.buy ? "arrowUp" : "arrowDown",
+      // Sit the dot on the rate; label hangs above buys / below sells so they don't collide
+      position: m.buy ? "atPriceTop" : "atPriceBottom",
+      shape: "circle",
       color: m.buy ? gain : loss,
-      size: 1.25,
+      size: 1.4,
       price: m.price,
       id: m.key,
-      text: m.buy ? "buy" : "sell",
+      text: pinAmount(m.amount),
     }));
     plugin.setMarkers(seriesMarkers);
   }, [marks]);
@@ -471,6 +501,14 @@ export function FxPairChart({
   }, [target, live, avg, data]);
 
   const shown = hover?.value ?? live;
+  const activePnl = activeMark ? markPnlVsNow(activeMark, liveRate) : null;
+  /** 1 currency = ? base at the trade and now */
+  const tradeBasePer = activeMark
+    ? flipped
+      ? activeMark.price
+      : 1 / activeMark.price
+    : undefined;
+  const nowBasePer = liveRate && liveRate > 0 ? 1 / liveRate : undefined;
 
   return (
     <div className="surface p-4">
@@ -607,24 +645,60 @@ export function FxPairChart({
         )}
       </div>
 
-      {/* Stable detail strip — no floating tooltip that leaves the chart */}
+      {/* Detail card — scrub near a pin; stays under the chart so zoom never fights a floating tooltip */}
       {activeMark ? (
         <div
-          className={`mt-2 rounded-xl border px-3 py-2 text-xs ${
+          className={`mt-2 rounded-xl border px-3 py-2.5 text-xs ${
             activeMark.buy ? "border-gain/30 bg-gain/10" : "border-loss/30 bg-loss/10"
           }`}
         >
-          <p className={`font-bold ${activeMark.buy ? "text-gain" : "text-loss"}`}>
-            {activeMark.buy ? "Bought" : "Sold"}{" "}
-            {activeMark.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {currency}
-          </p>
-          <p className="num mt-0.5 text-muted-foreground">
-            {activeMark.date} · 1 {currency} = {rate4(flipped ? activeMark.price : 1 / activeMark.price)}{" "}
-            {base} · {activeMark.eurAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}{" "}
-            {base}
-          </p>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <p className={`font-bold ${activeMark.buy ? "text-gain" : "text-loss"}`}>
+              {activeMark.buy ? "Bought" : "Sold"} {moneyAmt(activeMark.amount)} {currency}
+            </p>
+            <p className="num text-muted-foreground">
+              {new Date(`${activeMark.date}T12:00:00Z`).toLocaleDateString(undefined, {
+                dateStyle: "medium",
+              })}
+            </p>
+          </div>
+          <dl className="num mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{currency}</dt>
+              <dd className="font-semibold">{moneyAmt(activeMark.amount)}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{base}</dt>
+              <dd className="font-semibold">{moneyAmt(activeMark.eurAmount)}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">Rate then</dt>
+              <dd className="font-semibold">
+                1 {currency} = {tradeBasePer != null ? rate4(tradeBasePer) : "—"} {base}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">Rate now</dt>
+              <dd className="font-semibold">
+                1 {currency} = {nowBasePer != null ? rate4(nowBasePer) : "—"} {base}
+              </dd>
+            </div>
+          </dl>
+          {activePnl ? (
+            <p
+              className={`num mt-2 text-sm font-bold ${activePnl.pnl >= 0 ? "text-gain" : "text-loss"}`}
+            >
+              {activePnl.pnl >= 0 ? "+" : ""}
+              {moneyAmt(activePnl.pnl)} {base}{" "}
+              <span className="font-medium text-muted-foreground">
+                {activeMark.buy
+                  ? `vs what you paid · now worth ${moneyAmt(activePnl.nowWorth)} ${base}`
+                  : `vs holding · would be worth ${moneyAmt(activePnl.nowWorth)} ${base}`}
+              </span>
+            </p>
+          ) : null}
           {activeMark.description ? (
-            <p className="mt-0.5 line-clamp-1 text-muted-foreground">{activeMark.description}</p>
+            <p className="mt-1 line-clamp-1 text-muted-foreground">{activeMark.description}</p>
           ) : null}
         </div>
       ) : marks.length > 0 ? (
@@ -640,7 +714,7 @@ export function FxPairChart({
             {bought > 0 && sold > 0 ? " · " : ""}
             {sold > 0 ? `sold ${Math.round(sold).toLocaleString()} ${currency}` : ""}
           </span>
-          <span className="text-muted-foreground/80">Scrub near a pin to see details</span>
+          <span className="text-muted-foreground/80">Scrub near a pin for P&amp;L</span>
         </p>
       ) : (
         <p className="mt-1 text-[11px] text-muted-foreground">
