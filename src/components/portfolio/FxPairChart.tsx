@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   createChart,
-  createSeriesMarkers,
   AreaSeries,
   ColorType,
   LineStyle,
@@ -11,9 +10,6 @@ import {
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
-  type ISeriesMarkersPluginApi,
-  type SeriesMarker,
-  type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -53,6 +49,10 @@ type TradeMark = {
   description?: string;
 };
 
+type PinPos = { key: string; left: number; top: number };
+
+const PIN_STAGGER = 14;
+
 /** Resolve a CSS custom property (oklch etc.) to a plain rgb string. */
 function cssVar(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
@@ -80,31 +80,6 @@ function withAlpha(rgb: string, alpha: number) {
   return `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${alpha})`;
 }
 
-/** Nearest trade mark within ~1.5 chart bars of a crosshair time. */
-function nearestMark(marks: TradeMark[], t: number, barSec: number): TradeMark | null {
-  if (marks.length === 0) return null;
-  const tol = Math.max(barSec * 1.5, 86_400);
-  let best: TradeMark | null = null;
-  let bestDist = Infinity;
-  for (const m of marks) {
-    const d = Math.abs((m.time as number) - t);
-    if (d < bestDist) {
-      bestDist = d;
-      best = m;
-    }
-  }
-  return best && bestDist <= tol ? best : null;
-}
-
-/** Compact label for the pin: 1.2k, 850, 12k… */
-function pinAmount(n: number) {
-  const a = Math.abs(n);
-  if (a >= 10_000) return `${Math.round(a / 1000)}k`;
-  if (a >= 1000) return `${(a / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  if (a >= 100) return String(Math.round(a));
-  return a.toLocaleString(undefined, { maximumFractionDigits: 1 });
-}
-
 function moneyAmt(n: number) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
@@ -125,6 +100,30 @@ function markPnlVsNow(
   return { pnl, nowWorth };
 }
 
+/** Keep a floating tip inside the chart box. */
+function clampTip(
+  left: number,
+  top: number,
+  boxW: number,
+  boxH: number,
+): { left: number; top: number; place: "above" | "below" } {
+  const tipW = 232;
+  const tipH = 156;
+  const gap = 14;
+  let place: "above" | "below" = "above";
+  let y = top - gap;
+  if (y < tipH + 8) {
+    place = "below";
+    y = top + gap;
+  }
+  const x = Math.min(boxW - tipW / 2 - 8, Math.max(tipW / 2 + 8, left));
+  if (place === "below" && y + tipH > boxH - 4) {
+    place = "above";
+    y = top - gap;
+  }
+  return { left: x, top: y, place };
+}
+
 export function FxPairChart({
   currency,
   base = "EUR",
@@ -138,20 +137,21 @@ export function FxPairChart({
   /** true => show <base> per 1 CCY (e.g. 0.86 EUR per USD) — the sell-USD orientation */
   const [flipped, setFlipped] = useState(true);
   const [hover, setHover] = useState<{ value: number; time: number } | null>(null);
-  const [activeMark, setActiveMark] = useState<TradeMark | null>(null);
+  /** Which pin's tooltip is open — set by hovering/tapping that pin, not by scrubbing. */
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  /** Click keeps the tip open until you click another pin or the chart. */
+  const [pinnedKey, setPinnedKey] = useState<string | null>(null);
+  const [pins, setPins] = useState<PinPos[]>([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
 
   const boxRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
-  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const linesRef = useRef<IPriceLine[]>([]);
   const rafRef = useRef<number | null>(null);
   const lastSigRef = useRef<string>("");
   const autoZoomedRef = useRef<string | null>(null);
-  const marksRef = useRef<TradeMark[]>([]);
-  const barSecRef = useRef(86_400);
 
   const applyDates = () => {
     const ts = chartRef.current?.timeScale();
@@ -218,12 +218,6 @@ export function FxPairChart({
       })
       .sort((a, b) => (a.time as number) - (b.time as number));
   }, [myTrades, data, flipped]);
-
-  marksRef.current = marks;
-  barSecRef.current =
-    data.length >= 2
-      ? Math.max(60, ((data[data.length - 1]!.time as number) - (data[0]!.time as number)) / (data.length - 1))
-      : 86_400;
 
   const zoomToTrades = () => {
     const ts = chartRef.current?.timeScale();
@@ -345,7 +339,6 @@ export function FxPairChart({
       lastValueVisible: false,
       priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
     });
-    markersRef.current = createSeriesMarkers(series, [], { autoScale: true, zOrder: "top" });
     chartRef.current = chart;
     seriesRef.current = series;
 
@@ -353,19 +346,21 @@ export function FxPairChart({
       const v = param.seriesData.get(series) as { value?: number } | undefined;
       if (!param.time || !v?.value) {
         setHover(null);
-        setActiveMark(null);
         return;
       }
-      const t = param.time as number;
-      setHover({ value: v.value, time: t });
-      setActiveMark(nearestMark(marksRef.current, t, barSecRef.current));
+      setHover({ value: v.value, time: param.time as number });
+    });
+
+    // Tap empty chart to dismiss a pinned tooltip
+    chart.subscribeClick(() => {
+      setPinnedKey(null);
+      setOpenKey(null);
     });
 
     return () => {
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
-      markersRef.current = null;
       linesRef.current = [];
     };
   }, []);
@@ -424,7 +419,9 @@ export function FxPairChart({
 
   useEffect(() => {
     autoZoomedRef.current = null;
-  }, [myTrades.length]);
+    setOpenKey(null);
+    setPinnedKey(null);
+  }, [myTrades.length, currency, flipped, range]);
 
   useEffect(() => {
     if (data.length === 0 || marks.length === 0) return;
@@ -435,25 +432,56 @@ export function FxPairChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marks, data, currency]);
 
-  // Native canvas dots + amount — never steal pointer events from zoom/scrub
+  // HTML dots — same-day trades are staggered so each one is hoverable
   useEffect(() => {
-    const plugin = markersRef.current;
-    if (!plugin) return;
-    const gain = cssVar("--color-gain", "#16c784");
-    const loss = cssVar("--color-loss", "#ea3943");
-    const seriesMarkers: SeriesMarker<Time>[] = marks.map((m) => ({
-      time: m.time,
-      // Sit the dot on the rate; label hangs above buys / below sells so they don't collide
-      position: m.buy ? "atPriceTop" : "atPriceBottom",
-      shape: "circle",
-      color: m.buy ? gain : loss,
-      size: 1.4,
-      price: m.price,
-      id: m.key,
-      text: pinAmount(m.amount),
-    }));
-    plugin.setMarkers(seriesMarkers);
+    const chart = chartRef.current;
+    const s = seriesRef.current;
+    if (!chart || !s) return;
+    const compute = () => {
+      const ts = chart.timeScale();
+      // Group by candle so N buys on one day don't sit on top of each other
+      const groups = new Map<number, TradeMark[]>();
+      for (const m of marks) {
+        const t = m.time as number;
+        const list = groups.get(t) ?? [];
+        list.push(m);
+        groups.set(t, list);
+      }
+      const next: PinPos[] = [];
+      for (const group of groups.values()) {
+        const n = group.length;
+        group.forEach((m, i) => {
+          const x = ts.timeToCoordinate(m.time);
+          const y = s.priceToCoordinate(m.price);
+          if (x == null || y == null) return;
+          const dx = n > 1 ? (i - (n - 1) / 2) * PIN_STAGGER : 0;
+          // Tiny vertical fan when rates are identical so dots aren't stacked
+          const dy = n > 1 ? (i - (n - 1) / 2) * 3 : 0;
+          next.push({ key: m.key, left: x + dx, top: y + dy });
+        });
+      }
+      setPins(next);
+    };
+    compute();
+    const ts = chart.timeScale();
+    ts.subscribeVisibleLogicalRangeChange(compute);
+    const ro = new ResizeObserver(compute);
+    if (boxRef.current) ro.observe(boxRef.current);
+    const id = window.setInterval(compute, 250);
+    return () => {
+      ts.unsubscribeVisibleLogicalRangeChange(compute);
+      ro.disconnect();
+      window.clearInterval(id);
+    };
   }, [marks]);
+
+  // Drop tip when the open pin scrolls off the chart
+  useEffect(() => {
+    if (!openKey && !pinnedKey) return;
+    const keys = new Set(pins.map((p) => p.key));
+    if (openKey && !keys.has(openKey)) setOpenKey(null);
+    if (pinnedKey && !keys.has(pinnedKey)) setPinnedKey(null);
+  }, [pins, openKey, pinnedKey]);
 
   // break-even + average + live price lines
   useEffect(() => {
@@ -501,14 +529,20 @@ export function FxPairChart({
   }, [target, live, avg, data]);
 
   const shown = hover?.value ?? live;
+  const activeKey = openKey ?? pinnedKey;
+  const activeMark = activeKey ? (marks.find((m) => m.key === activeKey) ?? null) : null;
   const activePnl = activeMark ? markPnlVsNow(activeMark, liveRate) : null;
-  /** 1 currency = ? base at the trade and now */
   const tradeBasePer = activeMark
     ? flipped
       ? activeMark.price
       : 1 / activeMark.price
     : undefined;
   const nowBasePer = liveRate && liveRate > 0 ? 1 / liveRate : undefined;
+  const activePin = activeMark ? pins.find((p) => p.key === activeMark.key) : undefined;
+  const tip =
+    activeMark && activePin && boxRef.current
+      ? clampTip(activePin.left, activePin.top, boxRef.current.clientWidth, boxRef.current.clientHeight)
+      : null;
 
   return (
     <div className="surface p-4">
@@ -630,6 +664,83 @@ export function FxPairChart({
 
       <div className="relative mt-3">
         <div ref={boxRef} className="h-[360px] w-full max-w-full overflow-hidden touch-pan-y" />
+
+        {/* Overlay: only the dots capture pointer events — rest of chart still zooms/scrubs */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          {pins.map((p) => {
+            const m = marks.find((x) => x.key === p.key);
+            if (!m) return null;
+            const on = activeKey === p.key;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                aria-label={`${m.buy ? "Bought" : "Sold"} ${moneyAmt(m.amount)} ${currency} on ${m.date}`}
+                className="pointer-events-auto absolute z-10 flex size-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full"
+                style={{ left: p.left, top: p.top }}
+                onMouseEnter={() => setOpenKey(p.key)}
+                onMouseLeave={() => setOpenKey((k) => (k === p.key ? null : k))}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPinnedKey((k) => (k === p.key ? null : p.key));
+                  setOpenKey(p.key);
+                }}
+              >
+                <span
+                  className={`block size-2 rounded-full ring-2 ring-background transition-transform duration-150 ${
+                    m.buy ? "bg-gain" : "bg-loss"
+                  } ${on ? "scale-150" : "hover:scale-125"}`}
+                />
+              </button>
+            );
+          })}
+
+          {activeMark && tip && (
+            <div
+              className={`pointer-events-none absolute z-20 w-[232px] rounded-xl border bg-popover/95 p-2.5 text-left shadow-xl backdrop-blur ${
+                activeMark.buy ? "border-gain/40" : "border-loss/40"
+              }`}
+              style={{
+                left: tip.left,
+                top: tip.top,
+                transform:
+                  tip.place === "above" ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+              }}
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <p className={`text-[11px] font-bold ${activeMark.buy ? "text-gain" : "text-loss"}`}>
+                  {activeMark.buy ? "Bought" : "Sold"} {moneyAmt(activeMark.amount)} {currency}
+                </p>
+                <p className="num shrink-0 text-[10px] text-muted-foreground">
+                  {new Date(`${activeMark.date}T12:00:00Z`).toLocaleDateString(undefined, {
+                    dateStyle: "medium",
+                  })}
+                </p>
+              </div>
+              <p className="num mt-1 text-[11px] text-muted-foreground">
+                {moneyAmt(activeMark.amount)} {currency} for {moneyAmt(activeMark.eurAmount)} {base}
+              </p>
+              <p className="num text-[11px] text-muted-foreground">
+                1 {currency} = {tradeBasePer != null ? rate4(tradeBasePer) : "—"} {base} then
+                {nowBasePer != null ? ` · ${rate4(nowBasePer)} now` : ""}
+              </p>
+              {activePnl ? (
+                <p
+                  className={`num mt-1.5 text-[12px] font-bold ${
+                    activePnl.pnl >= 0 ? "text-gain" : "text-loss"
+                  }`}
+                >
+                  {activePnl.pnl >= 0 ? "+" : ""}
+                  {moneyAmt(activePnl.pnl)} {base}{" "}
+                  <span className="font-medium text-muted-foreground">
+                    {activeMark.buy ? "vs what you paid" : "vs holding to now"}
+                  </span>
+                </p>
+              ) : null}
+            </div>
+          )}
+        </div>
+
         {q.isFetching && data.length === 0 && (
           <div className="absolute inset-0 animate-pulse rounded-xl bg-gradient-to-b from-primary/10 to-transparent" />
         )}
@@ -645,76 +756,20 @@ export function FxPairChart({
         )}
       </div>
 
-      {/* Detail card — scrub near a pin; stays under the chart so zoom never fights a floating tooltip */}
-      {activeMark ? (
-        <div
-          className={`mt-2 rounded-xl border px-3 py-2.5 text-xs ${
-            activeMark.buy ? "border-gain/30 bg-gain/10" : "border-loss/30 bg-loss/10"
-          }`}
-        >
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <p className={`font-bold ${activeMark.buy ? "text-gain" : "text-loss"}`}>
-              {activeMark.buy ? "Bought" : "Sold"} {moneyAmt(activeMark.amount)} {currency}
-            </p>
-            <p className="num text-muted-foreground">
-              {new Date(`${activeMark.date}T12:00:00Z`).toLocaleDateString(undefined, {
-                dateStyle: "medium",
-              })}
-            </p>
-          </div>
-          <dl className="num mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
-            <div>
-              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{currency}</dt>
-              <dd className="font-semibold">{moneyAmt(activeMark.amount)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{base}</dt>
-              <dd className="font-semibold">{moneyAmt(activeMark.eurAmount)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">Rate then</dt>
-              <dd className="font-semibold">
-                1 {currency} = {tradeBasePer != null ? rate4(tradeBasePer) : "—"} {base}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">Rate now</dt>
-              <dd className="font-semibold">
-                1 {currency} = {nowBasePer != null ? rate4(nowBasePer) : "—"} {base}
-              </dd>
-            </div>
-          </dl>
-          {activePnl ? (
-            <p
-              className={`num mt-2 text-sm font-bold ${activePnl.pnl >= 0 ? "text-gain" : "text-loss"}`}
-            >
-              {activePnl.pnl >= 0 ? "+" : ""}
-              {moneyAmt(activePnl.pnl)} {base}{" "}
-              <span className="font-medium text-muted-foreground">
-                {activeMark.buy
-                  ? `vs what you paid · now worth ${moneyAmt(activePnl.nowWorth)} ${base}`
-                  : `vs holding · would be worth ${moneyAmt(activePnl.nowWorth)} ${base}`}
-              </span>
-            </p>
-          ) : null}
-          {activeMark.description ? (
-            <p className="mt-1 line-clamp-1 text-muted-foreground">{activeMark.description}</p>
-          ) : null}
-        </div>
-      ) : marks.length > 0 ? (
+      {marks.length > 0 ? (
         <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-gain" /> buy {currency}
+            <span className="size-2 rounded-full bg-gain" /> buy
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-loss" /> sell {currency}
+            <span className="size-2 rounded-full bg-loss" /> sell
           </span>
           <span className="num">
             {bought > 0 ? `bought ${Math.round(bought).toLocaleString()} ${currency}` : ""}
             {bought > 0 && sold > 0 ? " · " : ""}
             {sold > 0 ? `sold ${Math.round(sold).toLocaleString()} ${currency}` : ""}
           </span>
-          <span className="text-muted-foreground/80">Scrub near a pin for P&amp;L</span>
+          <span>Hover a pin for details</span>
         </p>
       ) : (
         <p className="mt-1 text-[11px] text-muted-foreground">
